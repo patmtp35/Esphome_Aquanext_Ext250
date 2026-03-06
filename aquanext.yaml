@@ -1,0 +1,262 @@
+################################################################################
+# Chaffoteaux AquaNext / Ariston Nuos - ESPHome Configuration
+# Protocole Janus2 (carte mère <-> IHM, TTL 5V, 9600 8N1)
+#
+# Câblage (via level shifter BSS138 5V <-> 3.3V OBLIGATOIRE) :
+#   Carte mère PIN3 (TX) -> LS -> ESP32 GPIO16 (RX)
+#   Carte mère PIN4 (RX) -> LS -> ESP32 GPIO17 (TX)
+#   Carte mère PIN1 (GND) -> GND ESP32
+#
+# Structure du projet :
+#   aquanext.yaml                        <- ce fichier
+#   components/aquanext/aquanext.h       <- composant C++
+################################################################################
+
+esphome:
+  name: aquanext
+  friendly_name: "Chaffoteaux AquaNext"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# ---- Logger (désactiver UART0 pour libérer GPIO1/3) ----
+logger:
+  baud_rate: 0
+  level: DEBUG
+
+# ---- API Home Assistant ----
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "AquaNext Fallback"
+    password: "aquanext123"
+
+captive_portal:
+
+# ---- Composant externe (notre fichier C++) ----
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [aquanext]
+
+# ---- Bus UART (9600 8N1, TTL 5V via level shifter) ----
+#uart:
+#  tx_pin: GPIO17   # à adapter selon pinout S2 Mini
+#  rx_pin: GPIO18   # vérifier le pinout Lolin S2 Mini
+uart:
+  id: uart_janus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+
+# ---- Composant principal AquaNext ----
+aquanext:
+  id: ballon
+  uart_id: uart_janus
+
+  # --- Températures ---
+  temperature_target:
+    name: "Température consigne"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_dome:
+    name: "Température dôme (TW3)"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_air:
+    name: "Température air entrée"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_evap:
+    name: "Température évaporateur"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_tw1:
+    name: "Température sonde eau TW1"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_tw2:
+    name: "Température sonde eau TW2"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_t_hp:
+    name: "Température sortie PAC"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+
+  temperature_t_max:
+    name: "Température max configurée"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+
+  temperature_t_min:
+    name: "Température min configurée"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+
+  # --- Compteurs horaires ---
+  hp_hours:
+    name: "Heures pompe à chaleur"
+    unit_of_measurement: "h"
+    accuracy_decimals: 0
+    icon: mdi:heat-pump
+    state_class: total_increasing
+
+  he_hours:
+    name: "Heures résistance électrique"
+    unit_of_measurement: "h"
+    accuracy_decimals: 0
+    icon: mdi:heating-coil
+    state_class: total_increasing
+
+  # --- Capteurs texte ---
+  mode:
+    name: "Mode de fonctionnement"
+    icon: mdi:water-boiler
+
+  fw_version:
+    name: "Version firmware carte mère"
+    icon: mdi:chip
+
+  # --- Capteurs binaires ---
+  power:
+    name: "Allumé"
+    device_class: power
+
+  heat_pump_active:
+    name: "Pompe à chaleur active"
+    icon: mdi:heat-pump
+
+  heat_element_active:
+    name: "Résistance électrique active"
+    icon: mdi:heating-coil
+
+  error_present:
+    name: "Erreur présente"
+    device_class: problem
+
+  setting_antibact:
+    name: "Anti-bactérien activé"
+    icon: mdi:bacteria-outline
+
+  setting_green:
+    name: "Mode green activé"
+    icon: mdi:leaf
+
+  setting_voyage:
+    name: "Mode voyage activé"
+    icon: mdi:airplane
+
+# ---- Bouton/select pour changer le mode ----
+select:
+  - platform: template
+    name: "Mode de chauffe"
+    id: select_mode
+    icon: mdi:water-boiler
+    options:
+      - "boost"
+      - "green"
+      - "voyage"
+    initial_option: "green"
+    optimistic: true
+    on_value:
+      then:
+        - lambda: |-
+            id(ballon).set_mode(x);
+
+# ---- Bouton ON/OFF ----
+switch:
+  - platform: template
+    name: "Marche / Arrêt"
+    id: switch_power
+    icon: mdi:power
+    optimistic: true
+    turn_on_action:
+      - lambda: id(ballon).set_power(true);
+    turn_off_action:
+      - lambda: id(ballon).set_power(false);
+
+  - platform: template
+    name: "Anti-bactérien"
+    id: switch_antibact
+    icon: mdi:bacteria-outline
+    optimistic: true
+    turn_on_action:
+      - lambda: id(ballon).set_antibact(true);
+    turn_off_action:
+      - lambda: id(ballon).set_antibact(false);
+
+# ---- Curseur température cible ----
+number:
+  - platform: template
+    name: "Température cible"
+    id: number_target_temp
+    icon: mdi:thermometer-water
+    min_value: 30
+    max_value: 65
+    step: 1
+    unit_of_measurement: "°C"
+    optimistic: true
+    set_action:
+      - lambda: id(ballon).set_target_temp(x);
+
+# ---- Boutons d'action ----
+button:
+  - platform: template
+    name: "Rafraîchir températures"
+    icon: mdi:thermometer-refresh
+    on_press:
+      - lambda: id(ballon).request_all_temps();
+
+  - platform: template
+    name: "Rafraîchir statut"
+    icon: mdi:refresh
+    on_press:
+      - lambda: id(ballon).request_status();
+
+# ---- Mise à jour automatique toutes les 60s ----
+interval:
+  - interval: 60s
+    then:
+      - lambda: id(ballon).request_all_temps();
+
+  - interval: 300s
+    then:
+      - lambda: id(ballon).request_status();
