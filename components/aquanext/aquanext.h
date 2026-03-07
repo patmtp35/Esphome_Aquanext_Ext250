@@ -224,53 +224,51 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Serial reception ----
+    // ---- Serial reception ----
   void read_serial_() {
+    while (available()) {
 
-  while (available()) {
+      uint8_t b = read();
 
-    uint8_t b = read();
+      // correction bit parasite (bus Janus)
+      if (b >= 0x80)
+        b -= 0x80;
 
-    // correction bit parasite (bus Janus)
-    if (b >= 0x80)
-      b -= 0x80;
+      // si ce n'est pas un caractère utile du protocole on ignore
+      if (!(b == JANUS_STX ||
+            b == JANUS_ETX ||
+            b == JANUS_CR  ||
+            b == JANUS_MSGT_READ ||
+            b == JANUS_MSGT_WRITE ||
+            (b >= '0' && b <= '9') ||
+            (b >= 'A' && b <= 'F')))
+        continue;
 
-    // si ce n'est pas un caractère utile du protocole on ignore
-    if (!(b == JANUS_STX ||
-          b == JANUS_ETX ||
-          b == JANUS_CR  ||
-          b == JANUS_MSGT_READ ||
-          b == JANUS_MSGT_WRITE ||
-          (b >= '0' && b <= '9') ||
-          (b >= 'A' && b <= 'F')))
-      continue;
+      ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
-    ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
+      // début de trame
+      if (b == JANUS_STX) {
+        rx_idx_ = 0;
+        in_frame_ = true;
+      }
 
-    // début de trame
-    if (b == JANUS_STX) {
-      rx_idx_ = 0;
-      in_frame_ = true;
+      if (!in_frame_)
+        continue;
+
+      if (rx_idx_ < sizeof(rx_buf_))
+        rx_buf_[rx_idx_++] = b;
+
+      // fin de trame
+      if (b == JANUS_CR) {
+        in_frame_ = false;
+
+        if (rx_idx_ > 10)
+          decode_frame_(rx_buf_, rx_idx_);
+
+        rx_idx_ = 0;
+      }
     }
-
-    if (!in_frame_)
-      continue;
-
-    if (rx_idx_ < sizeof(rx_buf_))
-      rx_buf_[rx_idx_++] = b;
-
-    // fin de trame
-    if (b == JANUS_CR) {
-
-      in_frame_ = false;
-
-      if (rx_idx_ > 10)
-        decode_frame_(rx_buf_, rx_idx_);
-
-      rx_idx_ = 0;
-    }
-  }
-}
-  
+  } 
 
   // ---- Frame decoding ----
 
