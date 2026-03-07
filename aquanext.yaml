@@ -2,12 +2,12 @@
 # Chaffoteaux AquaNext / Ariston Nuos - ESPHome Configuration
 # Protocole Janus2 (carte mère <-> IHM, TTL 5V, 9600 8N1)
 #
-# Câblage (via ADUM1201, isolation galvanique) :
-#   S2 Mini GPIO18 (RX) ──► ADUM1201 VIB → VOA ──► PIN3 TX carte mère
-#   S2 Mini GPIO17 (TX) ◄── ADUM1201 VIA ← VOB ◄── PIN4 RX carte mère
-#   3.3V S2 Mini ──► ADUM1201 VDD2
-#   5V externe (HLK-PM01) ──► ADUM1201 VDD1 + PIN 5V S2 Mini
-#   GND séparés des deux côtés (isolation galvanique préservée)
+# Câblage validé (via ADUM1201, isolation galvanique) :
+#   WROOM GPIO17 (RX) ──► ADUM1201 VOA → VIB ──► PIN1 TX RJ12 carte mère
+#   WROOM GPIO16 (TX) ◄── ADUM1201 VIA ← VOB ◄── PIN2 RX RJ12 carte mère
+#   3.3V WROOM ──► ADUM1201 VDD2 / GND WROOM ──► ADUM1201 GND2
+#   5V RJ12 Pin3 ──► ADUM1201 VDD1 / GND RJ12 Pin4 ──► ADUM1201 GND1
+#   GND1 et GND2 séparés (isolation galvanique préservée)
 ################################################################################
 
 substitutions:
@@ -42,7 +42,7 @@ esphome:
     version: ${appversion}
 
 esp32:
-  board: lolin_s2_mini
+  board: esp32dev
   framework:
     type: arduino
 
@@ -58,59 +58,25 @@ external_components:
     components: [aquanext]
 
 # ---- Bus UART Janus2 (9600 8N1, TTL 5V via ADUM1201) ----
+# GPIO16=TX et GPIO17=RX (inversé par rapport au standard, validé sur ton câblage)
 uart:
   id: uart_janus
-  tx_pin: GPIO17
-  rx_pin: GPIO18
+  tx_pin: GPIO16
+  rx_pin: GPIO17
   baud_rate: 9600
   data_bits: 8
   parity: NONE
   stop_bits: 1
 
-# ---- LED RGB WS2812 intégrée du S2 Mini (GPIO15, pas GPIO2) ----
-light:
-  - platform: esp32_rmt_led_strip
-    id: status_rgb
-    name: "Status LED"
-    pin: GPIO15
-    num_leds: 1
-    rmt_channel: 0
-    rgb_order: GRB
-    chipset: WS2812
-    default_transition_length: 0s
-    effects:
-      - pulse:
-          name: "Pulse Bleu"
-          transition_length: 500ms
-          update_interval: 500ms
+# ---- LED status WROOM (GPIO2 = LED bleue intégrée) ----
+# clignote rapidement = pas de WiFi / boot
+# fixe = connecté et opérationnel
+status_led:
+  pin:
+    number: GPIO2
 
-# ---- Indicateur visuel via la LED RGB ----
-# Bleu clignotant = connexion WiFi en cours
-# Vert fixe       = connecté et opérationnel  
-# Rouge fixe      = erreur détectée
+# ---- Rafraîchissement automatique ----
 interval:
-  - interval: 5s
-    then:
-      - if:
-          condition:
-            wifi.connected:
-          then:
-            - light.turn_on:
-                id: status_rgb
-                red: 0%
-                green: 100%
-                blue: 0%
-                brightness: 20%
-          else:
-            - light.turn_on:
-                id: status_rgb
-                red: 0%
-                green: 0%
-                blue: 100%
-                brightness: 50%
-                effect: "Pulse Bleu"
-
-  # ---- Rafraîchissement automatique ----
   - interval: 60s
     then:
       - lambda: id(ballon).request_all_temps();

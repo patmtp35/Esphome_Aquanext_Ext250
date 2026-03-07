@@ -306,37 +306,35 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Frame building & sending ----
-
   void build_and_send_(uint8_t msgt, int fkt, uint8_t *data, int data_len, uint8_t len_field) {
     uint8_t frame[64];
     int idx = 0;
 
-    // 7x préambule 0xFF (observé sur HMI->Main)
+    // 7 bytes préambule
     for (int i = 0; i < 7; i++) frame[idx++] = 0xFF;
 
     frame[idx++] = JANUS_STX;
     frame[idx++] = msgt;
 
     if (msgt == JANUS_MSGT_WRITE) {
-      // Pour C2 : 3ème octet = longueur en ASCII
       frame[idx++] = '0' + data_len;
     }
 
-    // FKT en 3 chars ASCII hex
+    // FKT ASCII HEX
     char fkt_str[4];
-    snprintf(fkt_str, 4, "%03X", fkt);
+    snprintf(fkt_str, sizeof(fkt_str), "%03X", fkt);
+
     frame[idx++] = fkt_str[0];
     frame[idx++] = fkt_str[1];
     frame[idx++] = fkt_str[2];
 
-    // Padding 00
+    // padding
     frame[idx++] = '0';
     frame[idx++] = '0';
 
     if (msgt == JANUS_MSGT_READ) {
-      // Pour C1 : LEN sur 2 chars
       char len_str[3];
-      snprintf(len_str, 3, "%02X", data_len);
+      snprintf(len_str, sizeof(len_str), "%02X", data_len);
       frame[idx++] = len_str[0];
       frame[idx++] = len_str[1];
     }
@@ -344,24 +342,30 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     // DATA
     for (int i = 0; i < data_len; i++) {
       char hex[3];
-      snprintf(hex, 3, "%02X", data[i]);
+      snprintf(hex, sizeof(hex), "%02X", data[i]);
       frame[idx++] = hex[0];
       frame[idx++] = hex[1];
     }
 
     frame[idx++] = JANUS_ETX;
 
-    // LRC depuis MSGT (index 8) jusqu'à ETX inclus
+    // ---- LRC BINAIRE ----
     uint8_t lrc = 0;
-    for (int i = 8; i < idx; i++) lrc += frame[i];
-    char lrc_str[3];
-    snprintf(lrc_str, 3, "%02X", lrc);
-    frame[idx++] = lrc_str[0];
-    frame[idx++] = lrc_str[1];
+    for (int i = 8; i < idx; i++) {
+      lrc += frame[i];
+    }
 
+    frame[idx++] = lrc;   // LRC binaire sur 1 octet
     frame[idx++] = JANUS_CR;
 
+    // debug TX
+    ESP_LOGD("aquanext", "TX raw:");
+    for (int i = 0; i < idx; i++) {
+      ESP_LOGD("aquanext", "%02X ", frame[i]);
+    }
+
     write_array(frame, idx);
+
     ESP_LOGD("aquanext", "TX [%d bytes] FKT=%03X", idx, fkt);
   }
 
