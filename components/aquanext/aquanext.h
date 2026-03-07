@@ -172,10 +172,11 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   static bool check_lrc_(uint8_t *frame, int len) {
-    // frame[0]=STX, frame[len-3]=LRC_hi, frame[len-2]=LRC_lo, frame[len-1]=CR
+    // Structure: ... DATA | ETX(frame[-3]) | LRC(frame[-2], 1 byte binaire) | CR(frame[-1])
+    // LRC = somme de MSGT(frame[1]) jusqu'a ETX(frame[-3]) inclus, modulo 256
     uint8_t sum = 0;
-    for (int i = 1; i <= len - 4; i++) sum += frame[i];
-    uint8_t lrc = hex_to_byte_(frame[len - 3], frame[len - 2]);
+    for (int i = 1; i <= len - 3; i++) sum += frame[i];  // inclut ETX
+    uint8_t lrc = frame[len - 2];  // LRC = 1 byte binaire
     return sum == lrc;
   }
 
@@ -213,11 +214,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     uint8_t msgt = frame[1];
     char fkt_str[4] = {(char)frame[2], (char)frame[3], (char)frame[4], 0};
     int fkt = strtol(fkt_str, nullptr, 16);
-    int data_len = hex_to_byte_(frame[6], frame[7]);
+    // Structure: STX(0) MSGT(1) FKT(2,3,4) PAD(5,6) LEN(7,8) DATA(9..) ETX LRC CR
+    int data_len = hex_to_byte_(frame[7], frame[8]);
 
     uint8_t data[16] = {};
-    for (int i = 0; i < data_len && i < 8; i++) {
-      data[i] = hex_to_byte_(frame[8 + i * 2], frame[9 + i * 2]);
+    for (int i = 0; i < data_len && i < 16; i++) {
+      data[i] = hex_to_byte_(frame[9 + i * 2], frame[10 + i * 2]);
     }
 
     if (msgt != JANUS_MSGT_READ) return;
