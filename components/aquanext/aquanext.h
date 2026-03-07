@@ -2,7 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
-#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/sensor/sensor.h"void read_serial
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 
@@ -222,32 +222,39 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   // ---- Serial reception ----
   void read_serial_() {
     while (available()) {
+
       uint8_t b = read();
-      b &= 0x7F;   // supprime le bit 7 parasite
+
+      // correction du bit 7 parasite
+      if (b >= 0x80)
+        b -= 0x80;
 
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
+      // Début de trame
       if (b == JANUS_STX) {
         rx_idx_ = 0;
         in_frame_ = true;
         rx_buf_[rx_idx_++] = b;
-      } else if (in_frame_) {
-        if (rx_idx_ < (int) sizeof(rx_buf_)) {
-          rx_buf_[rx_idx_++] = b;
-        } else {
-          ESP_LOGW("aquanext", "RX buffer overflow, trame abandonnée");
-          rx_idx_ = 0;
-          in_frame_ = false;
-          return;
-        }
+        continue;
+      }
 
-        if (b == JANUS_CR) {
-          in_frame_ = false;
-          decode_frame_(rx_buf_, rx_idx_);
-          rx_idx_ = 0;
-        }
+      // Si on n'est pas dans une trame, on ignore
+      if (!in_frame_)
+        continue;
+
+      // Stockage dans le buffer
+      if (rx_idx_ < sizeof(rx_buf_))
+        rx_buf_[rx_idx_++] = b;
+
+      // Fin de trame
+      if (b == JANUS_CR) {
+        in_frame_ = false;
+        decode_frame_(rx_buf_, rx_idx_);
+        rx_idx_ = 0;
       }
     }
+  }
   }
 
   // ---- Frame decoding ----
