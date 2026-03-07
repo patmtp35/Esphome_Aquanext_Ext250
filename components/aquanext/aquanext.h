@@ -315,7 +315,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     int idx = 0;
 
     // 7 bytes préambule
-    for (int i = 0; i < 7; i++) frame[idx++] = 0xFF;
+    
 
     frame[idx++] = JANUS_STX;
     frame[idx++] = msgt;
