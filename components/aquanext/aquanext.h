@@ -181,16 +181,20 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Serial reception ----
-
   void read_serial_() {
     while (available()) {
+
       uint8_t b = read();
+
+      ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
+
       if (b == JANUS_STX) {
         rx_idx_ = 0;
         in_frame_ = true;
         rx_buf_[rx_idx_++] = b;
       } else if (in_frame_) {
         if (rx_idx_ < 64) rx_buf_[rx_idx_++] = b;
+
         if (b == JANUS_CR) {
           in_frame_ = false;
           decode_frame_(rx_buf_, rx_idx_);
