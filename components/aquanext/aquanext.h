@@ -232,11 +232,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       uint8_t b = read();
 
       // correction ciblée des octets Janus parasités
-      if (b >= 0xB0 && b <= 0xB9) b -= 0x80;          // '0'..'9'
-      else if (b >= 0xC1 && b <= 0xC6) b -= 0x80;     // 'A'..'F'
-      else if (b == 0x82) b = 0x02;                   // STX
-      else if (b == 0x83) b = 0x03;                   // ETX
-      else if (b == 0x8D) b = 0x0D;                   // CR
+      b &= 0x7F;
 
       // si ce n'est pas un caractère utile du protocole on ignore
       if (!(b == JANUS_STX ||
