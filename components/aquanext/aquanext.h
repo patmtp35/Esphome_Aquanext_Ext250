@@ -224,6 +224,9 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     while (available()) {
       uint8_t b = read();
 
+      if (b >= 0x80)
+         b -= 0x80;
+
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
       if (b == JANUS_STX) {
