@@ -224,19 +224,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Serial reception ----
-    // ---- Serial reception ----
-    // ---- Serial reception ----
-  void read_serial_() {
+    void read_serial_() {
     while (available()) {
-
       uint8_t b = read();
-
-      // correction ciblée des octets Janus parasités
-      b &= 0x7F;
 
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
-      // début de trame
       if (b == JANUS_STX) {
         rx_idx_ = 0;
         in_frame_ = true;
@@ -253,7 +246,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         return;
       }
 
-      // fin de trame
       if (b == JANUS_CR) {
         in_frame_ = false;
 
@@ -263,7 +255,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         rx_idx_ = 0;
       }
     }
-  } 
+  }
 
   // ---- Frame decoding ----
 
