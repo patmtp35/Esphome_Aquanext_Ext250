@@ -222,7 +222,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   // ---- Serial reception ----
   void read_serial_() {
     while (available()) {
-      uint8_t b = read() & 0x7F;
+      uint8_t b = read();
 
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
