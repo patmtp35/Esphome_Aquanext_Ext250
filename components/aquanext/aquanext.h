@@ -206,7 +206,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       return false;
 
     uint8_t rx_lrc = frame[len - 2];
-    uint8_t calc_lrc = compute_lrc_(frame, 1, len - 3);  // de MSGT à ETX inclus
+    uint8_t calc_lrc = compute_lrc_(frame, 1, len - 4);  // de MSGT à ETX inclus
 
     return rx_lrc == calc_lrc;
   }
@@ -274,7 +274,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     if (!check_lrc_(frame, len)) {
       uint8_t rx_lrc = frame[len - 2];
-      uint8_t calc_lrc = compute_lrc_(frame, 1, len - 3);
+      uint8_t calc_lrc = compute_lrc_(frame, 1, len - 4);
       ESP_LOGW("aquanext", "LRC invalide rx=0x%02X calc=0x%02X", rx_lrc, calc_lrc);
       return;
     }
