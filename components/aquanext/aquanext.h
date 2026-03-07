@@ -316,14 +316,9 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     frame[idx++] = JANUS_STX;
     frame[idx++] = msgt;
 
-    if (msgt == JANUS_MSGT_WRITE) {
-      frame[idx++] = '0' + data_len;
-    }
-
-    // FKT ASCII HEX
+    // FKT ASCII HEX sur 3 caractères
     char fkt_str[4];
     snprintf(fkt_str, sizeof(fkt_str), "%03X", fkt);
-
     frame[idx++] = fkt_str[0];
     frame[idx++] = fkt_str[1];
     frame[idx++] = fkt_str[2];
@@ -332,14 +327,13 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     frame[idx++] = '0';
     frame[idx++] = '0';
 
-    if (msgt == JANUS_MSGT_READ) {
-      char len_str[3];
-      snprintf(len_str, sizeof(len_str), "%02X", data_len);
-      frame[idx++] = len_str[0];
-      frame[idx++] = len_str[1];
-    }
+    // LEN ASCII HEX sur 2 caractères
+    char len_str[3];
+    snprintf(len_str, sizeof(len_str), "%02X", len_field);
+    frame[idx++] = len_str[0];
+    frame[idx++] = len_str[1];
 
-    // DATA
+    // DATA (encodée en ASCII HEX)
     for (int i = 0; i < data_len; i++) {
       char hex[3];
       snprintf(hex, sizeof(hex), "%02X", data[i]);
@@ -349,29 +343,32 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     frame[idx++] = JANUS_ETX;
 
-    // ---- LRC BINAIRE ----
+    // LRC binaire : somme de MSGT jusqu'à ETX inclus
     uint8_t lrc = 0;
     for (int i = 8; i < idx; i++) {
       lrc += frame[i];
     }
+    frame[idx++] = lrc;
 
-    frame[idx++] = lrc;   // LRC binaire sur 1 octet
     frame[idx++] = JANUS_CR;
 
-    // debug TX
-    ESP_LOGD("aquanext", "TX raw:");
-    for (int i = 0; i < idx; i++) {
-      ESP_LOGD("aquanext", "%02X ", frame[i]);
+    // debug TX en une ligne
+    char logbuf[200];
+    int pos = 0;
+    pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, "TX raw:");
+    for (int i = 0; i < idx && pos < (int) sizeof(logbuf) - 4; i++) {
+      pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", frame[i]);
     }
+    ESP_LOGD("aquanext", "%s", logbuf);
 
     write_array(frame, idx);
+    flush();
 
-    ESP_LOGD("aquanext", "TX [%d bytes] FKT=%03X", idx, fkt);
+    ESP_LOGD("aquanext", "TX [%d bytes] FKT=%03X LEN=%02X", idx, fkt, len_field);
   }
 
   void request_function_(int fkt) {
-    uint8_t data = 0x01;
-    build_and_send_(JANUS_MSGT_READ, fkt, &data, 1, 1);
+    build_and_send_(JANUS_MSGT_READ, fkt, nullptr, 0, 0);
   }
 
   void send_confirm_(int fkt, uint8_t *data, int data_len) {
