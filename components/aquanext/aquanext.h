@@ -225,19 +225,23 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
   // ---- Serial reception ----
     // ---- Serial reception ----
+    // ---- Serial reception ----
   void read_serial_() {
     while (available()) {
 
       uint8_t b = read();
 
-      // correction bit parasite (bus Janus)
-      if (b >= 0x80)
-        b -= 0x80;
+      // correction ciblée des octets Janus parasités
+      if (b >= 0xB0 && b <= 0xB9) b -= 0x80;          // '0'..'9'
+      else if (b >= 0xC1 && b <= 0xC6) b -= 0x80;     // 'A'..'F'
+      else if (b == 0x82) b = 0x02;                   // STX
+      else if (b == 0x83) b = 0x03;                   // ETX
+      else if (b == 0x8D) b = 0x0D;                   // CR
 
       // si ce n'est pas un caractère utile du protocole on ignore
       if (!(b == JANUS_STX ||
             b == JANUS_ETX ||
-            b == JANUS_CR  ||
+            b == JANUS_CR ||
             b == JANUS_MSGT_READ ||
             b == JANUS_MSGT_WRITE ||
             (b >= '0' && b <= '9') ||
