@@ -260,7 +260,8 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   // ---- Frame decoding ----
 
   void decode_frame_(uint8_t *frame, int len) {
-    if (len < 12)
+   log_frame_("RX frame brute", frame, len); 
+   if (len < 12)
       return;
 
     if (frame[0] != JANUS_STX)
