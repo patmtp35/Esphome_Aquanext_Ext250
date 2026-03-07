@@ -224,8 +224,10 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     while (available()) {
       uint8_t b = read();
 
-      if (b >= 0x80)
-         b -= 0x80;
+      if (b >= 0xB0 && b <= 0xB9) b -= 0x80;   // '0'..'9'
+      if (b >= 0xC1 && b <= 0xC6) b -= 0x80;   // 'A'..'F'
+      if (b == 0x82) b = 0x02;                 // STX
+      if (b == 0x83) b = 0x03;                 // ETX
 
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
