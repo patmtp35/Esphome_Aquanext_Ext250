@@ -225,40 +225,51 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
   // ---- Serial reception ----
   void read_serial_() {
-    while (available()) {
 
-      uint8_t b = read();
+  while (available()) {
 
-      // correction du bit 7 parasite
-      if (b >= 0x80)
-        b -= 0x80;
+    uint8_t b = read();
 
-      ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
+    // correction bit parasite (bus Janus)
+    if (b >= 0x80)
+      b -= 0x80;
 
-      // Début de trame
-      if (b == JANUS_STX) {
-        rx_idx_ = 0;
-        in_frame_ = true;
-        rx_buf_[rx_idx_++] = b;
-        continue;
-      }
+    // si ce n'est pas un caractère utile du protocole on ignore
+    if (!(b == JANUS_STX ||
+          b == JANUS_ETX ||
+          b == JANUS_CR  ||
+          b == JANUS_MSGT_READ ||
+          b == JANUS_MSGT_WRITE ||
+          (b >= '0' && b <= '9') ||
+          (b >= 'A' && b <= 'F')))
+      continue;
 
-      // Si on n'est pas dans une trame, on ignore
-      if (!in_frame_)
-        continue;
+    ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
-      // Stockage dans le buffer
-      if (rx_idx_ < sizeof(rx_buf_))
-        rx_buf_[rx_idx_++] = b;
+    // début de trame
+    if (b == JANUS_STX) {
+      rx_idx_ = 0;
+      in_frame_ = true;
+    }
 
-      // Fin de trame
-      if (b == JANUS_CR) {
-        in_frame_ = false;
+    if (!in_frame_)
+      continue;
+
+    if (rx_idx_ < sizeof(rx_buf_))
+      rx_buf_[rx_idx_++] = b;
+
+    // fin de trame
+    if (b == JANUS_CR) {
+
+      in_frame_ = false;
+
+      if (rx_idx_ > 10)
         decode_frame_(rx_buf_, rx_idx_);
-        rx_idx_ = 0;
-      }
+
+      rx_idx_ = 0;
     }
   }
+}
   
 
   // ---- Frame decoding ----
