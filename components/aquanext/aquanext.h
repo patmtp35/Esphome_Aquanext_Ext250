@@ -315,7 +315,11 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     int idx = 0;
 
     // 7 bytes préambule
-    
+    ESP_LOGD("aquanext", "TX raw:");
+
+    for (int i = 0; i < idx; i++) {
+     ESP_LOGD("aquanext", "%02X ", frame[i]);
+    }
 
     frame[idx++] = JANUS_STX;
     frame[idx++] = msgt;
