@@ -234,16 +234,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       // correction ciblée des octets Janus parasités
       b &= 0x7F;
 
-      // si ce n'est pas un caractère utile du protocole on ignore
-      if (!(b == JANUS_STX ||
-            b == JANUS_ETX ||
-            b == JANUS_CR ||
-            b == JANUS_MSGT_READ ||
-            b == JANUS_MSGT_WRITE ||
-            (b >= '0' && b <= '9') ||
-            (b >= 'A' && b <= 'F')))
-        continue;
-
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
 
       // début de trame
@@ -255,8 +245,13 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       if (!in_frame_)
         continue;
 
-      if (rx_idx_ < sizeof(rx_buf_))
+      if (rx_idx_ < sizeof(rx_buf_) - 1) {
         rx_buf_[rx_idx_++] = b;
+      } else {
+        in_frame_ = false;
+        rx_idx_ = 0;
+        return;
+      }
 
       // fin de trame
       if (b == JANUS_CR) {
