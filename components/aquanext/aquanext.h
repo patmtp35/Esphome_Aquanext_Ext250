@@ -255,7 +255,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       }
     }
   }
-  }
+  
 
   // ---- Frame decoding ----
 
