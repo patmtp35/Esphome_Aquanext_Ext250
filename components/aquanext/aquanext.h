@@ -154,6 +154,11 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   int     expected_len_ = 0;
   uint8_t current_settings_ = 0x00;
 
+  // ---- Echo TX suppression ----
+  // Sur bus Janus2 half-duplex, on recoit notre propre TX en echo
+  // On ignore les N premiers octets apres chaque TX
+  int     echo_skip_    = 0;  // nb d'octets TX restant a ignorer
+
   // ---- TX queue (evite les envois simultanees qui corrompent les reponses) ----
   static const int TX_QUEUE_SIZE = 16;
   int     tx_queue_[TX_QUEUE_SIZE];
@@ -215,6 +220,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void read_serial_() {
     while (available()) {
       uint8_t raw = read();
+      // Ignore les echos de notre propre TX (bus half-duplex)
+      if (echo_skip_ > 0) {
+        echo_skip_--;
+        continue;
+      }
+
       // Ignore les 0xFF : ce sont les echos de notre propre preambule (bus half-duplex)
       if (raw == 0xFF) continue;
 
@@ -244,14 +255,35 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
       // Calcule longueur attendue des que LEN est disponible (pos 7 et 8)
       if (rx_idx_ == 9) {
-        uint8_t data_len  = hex_to_byte_(rx_buf_[7] & 0x7F, rx_buf_[8] & 0x7F);
-        // STX(1) MSGT(1) FKT(3) PAD(2) LEN(2) DATA(data_len*2) ETX(1) LRC(1) = 11 + data_len*2
-        // On n'attend plus le CR - on cloture apres LRC
+        uint8_t len_hi = rx_buf_[7] & 0x7F;
+        uint8_t len_lo = rx_buf_[8] & 0x7F;
+        // Securite: LEN ASCII hex valide uniquement ('0'-'9','A'-'F')
+        bool len_valid = ((len_hi >= '0' && len_hi <= '9') || (len_hi >= 'A' && len_hi <= 'F'))
+                      && ((len_lo >= '0' && len_lo <= '9') || (len_lo >= 'A' && len_lo <= 'F'));
+        uint8_t data_len = len_valid ? hex_to_byte_(len_hi, len_lo) : 0;
+        // Sanity check: data_len > 16 est suspect (trame corrompue)
+        // On plafonne a 16 octets de data max (32 chars ASCII)
+        if (data_len > 16) {
+          ESP_LOGW("aquanext", "data_len suspect (%d), force a 0", data_len);
+          data_len = 0;
+        }
         expected_len_ = 11 + data_len * 2;
         ESP_LOGD("aquanext", "Longueur trame attendue: %d (data=%d)", expected_len_, data_len);
       }
 
-      // Cloture quand longueur atteinte
+      // Cloture sur ETX+LRC : si on voit ETX a la position attendue ou apres pos 9
+      // Cela gere le cas ou le ballon repond avec moins de data que LEN l'indique
+      if (rx_idx_ >= 11 && (rx_buf_[rx_idx_ - 2] & 0x7F) == JANUS_ETX) {
+        // ETX detecte en avant-derniere position -> LRC est le dernier octet recu
+        in_frame_     = false;
+        int frame_len = rx_idx_;
+        rx_idx_       = 0;
+        expected_len_ = 0;
+        decode_frame_(rx_buf_, frame_len);
+        continue;
+      }
+
+      // Cloture aussi par longueur calculee (securite)
       if (expected_len_ > 0 && rx_idx_ >= expected_len_) {
         in_frame_     = false;
         int frame_len = rx_idx_;
@@ -431,6 +463,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     write_array(frame, idx);
     flush();
+    echo_skip_ = idx;  // on va recevoir ces idx octets en echo, on les ignore
   }
 
   void build_write_(int fkt, uint8_t *data, int data_len) {
@@ -475,6 +508,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     write_array(frame, idx);
     flush();
+    echo_skip_ = idx;  // on va recevoir ces idx octets en echo, on les ignore
   }
 
   void request_function_(int fkt) {
