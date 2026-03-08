@@ -261,8 +261,34 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         uint8_t len_hi = rx_buf_[7] & 0x7F;
         uint8_t len_lo = rx_buf_[8] & 0x7F;
         uint8_t data_len = hex_to_byte_(len_hi, len_lo);
+        // Table FKT -> data_len attendu selon doc Janus2
+        // Permet de corriger si LEN est corrompu (bit flip)
+        {
+          char fkt_hi = rx_buf_[2] & 0x7F;
+          char fkt_mi = rx_buf_[3] & 0x7F;
+          char fkt_lo = rx_buf_[4] & 0x7F;
+          char fs[4] = {fkt_hi, fkt_mi, fkt_lo, 0};
+          int fkt_id = strtol(fs, nullptr, 16);
+          int expected_dl = -1;
+          switch (fkt_id) {
+            case 0x003: expected_dl = 9; break;  // STATUS
+            case 0x004: expected_dl = 4; break;  // ERRORS
+            case 0x005: case 0x006: case 0x00A: case 0x00B:
+            case 0x00C: case 0x00D: case 0x00E: case 0x012:
+                        expected_dl = 2; break;  // temperatures
+            case 0x007: expected_dl = 1; break;  // SETTINGS
+            case 0x008: expected_dl = 3; break;  // SW_MB
+            case 0x010: case 0x011: expected_dl = 4; break;  // HP/HE hours
+            case 0x014: expected_dl = 1; break;  // TIME_W
+            case 0x001: expected_dl = 1; break;  // ONOFF
+            default: break;
+          }
+          if (expected_dl > 0 && data_len != expected_dl) {
+            ESP_LOGD("aquanext", "LEN corrige: FKT=%03X recu=%d attendu=%d", fkt_id, data_len, expected_dl);
+            data_len = expected_dl;
+          }
+        }
         // Sanity check: data_len > 16 est suspect (trame corrompue)
-        // On plafonne a 16 octets de data max (32 chars ASCII)
         if (data_len > 16) {
           ESP_LOGW("aquanext", "data_len suspect (%d), force a 0", data_len);
           data_len = 0;
