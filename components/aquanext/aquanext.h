@@ -360,12 +360,18 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Frame building & sending ----
-  void build_and_send_(uint8_t msgt, int fkt, uint8_t *data, int data_len, uint8_t len_field) {
-    uint8_t frame[64];
+  // READ  : FF*7 + STX MSGT FKT[3] PAD[2] LEN[2 ASCII] ETX LRC CR
+  //         LEN='01' pour demander une valeur
+  // WRITE : FF*7 + STX MSGT LEN[1 ASCII] FKT[3] PAD[2] DATA[LEN*2 ASCII] ETX LRC CR
+  //         LEN='1','2'... (1 seul char ASCII = nb d'octets data)
+
+  void build_read_(int fkt) {
+    uint8_t frame[80];
     int idx = 0;
 
+    for (int i = 0; i < 7; i++) frame[idx++] = 0xFF;
     frame[idx++] = JANUS_STX;
-    frame[idx++] = msgt;
+    frame[idx++] = JANUS_MSGT_READ;
 
     char fkt_str[4];
     snprintf(fkt_str, sizeof(fkt_str), "%03X", fkt);
@@ -373,13 +379,47 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     frame[idx++] = fkt_str[1];
     frame[idx++] = fkt_str[2];
 
+    frame[idx++] = '0';  // PAD
     frame[idx++] = '0';
-    frame[idx++] = '0';
+    frame[idx++] = '0';  // LEN = '01'
+    frame[idx++] = '1';
 
-    char len_str[3];
-    snprintf(len_str, sizeof(len_str), "%02X", len_field);
-    frame[idx++] = len_str[0];
-    frame[idx++] = len_str[1];
+    frame[idx++] = JANUS_ETX;
+
+    uint8_t lrc = 0;
+    for (int i = 8; i < idx; i++) lrc += frame[i];
+    frame[idx++] = lrc;
+    frame[idx++] = JANUS_CR;
+
+    char logbuf[200];
+    int pos = snprintf(logbuf, sizeof(logbuf), "TX READ:");
+    for (int i = 7; i < idx && pos < (int)sizeof(logbuf) - 4; i++)
+      pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", frame[i]);
+    ESP_LOGD("aquanext", "%s FKT=%03X", logbuf, fkt);
+
+    write_array(frame, idx);
+    flush();
+  }
+
+  void build_write_(int fkt, uint8_t *data, int data_len) {
+    uint8_t frame[80];
+    int idx = 0;
+
+    for (int i = 0; i < 7; i++) frame[idx++] = 0xFF;
+    frame[idx++] = JANUS_STX;
+    frame[idx++] = JANUS_MSGT_WRITE;
+
+    // WRITE: LEN vient AVANT FKT (1 seul char ASCII)
+    frame[idx++] = '0' + data_len;  // '1', '2'...
+
+    char fkt_str[4];
+    snprintf(fkt_str, sizeof(fkt_str), "%03X", fkt);
+    frame[idx++] = fkt_str[0];
+    frame[idx++] = fkt_str[1];
+    frame[idx++] = fkt_str[2];
+
+    frame[idx++] = '0';  // PAD
+    frame[idx++] = '0';
 
     for (int i = 0; i < data_len; i++) {
       char hex[3];
@@ -390,30 +430,27 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     frame[idx++] = JANUS_ETX;
 
-    // LRC : somme de frame[1] (MSGT) jusqu'a ETX inclus
     uint8_t lrc = 0;
-    for (int i = 1; i < idx; i++) lrc += frame[i];
+    for (int i = 8; i < idx; i++) lrc += frame[i];
     frame[idx++] = lrc;
     frame[idx++] = JANUS_CR;
 
-    // Log TX
     char logbuf[200];
-    int pos = snprintf(logbuf, sizeof(logbuf), "TX raw:");
-    for (int i = 0; i < idx && pos < (int)sizeof(logbuf) - 4; i++)
+    int pos = snprintf(logbuf, sizeof(logbuf), "TX WRITE:");
+    for (int i = 7; i < idx && pos < (int)sizeof(logbuf) - 4; i++)
       pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", frame[i]);
-    ESP_LOGD("aquanext", "%s", logbuf);
-    ESP_LOGD("aquanext", "TX [%d bytes] FKT=%03X", idx, fkt);
+    ESP_LOGD("aquanext", "%s FKT=%03X", logbuf, fkt);
 
     write_array(frame, idx);
     flush();
   }
 
   void request_function_(int fkt) {
-    build_and_send_(JANUS_MSGT_READ, fkt, nullptr, 0, 0);
+    build_read_(fkt);
   }
 
   void send_confirm_(int fkt, uint8_t *data, int data_len) {
-    build_and_send_(JANUS_MSGT_WRITE, fkt, data, data_len, data_len);
+    build_write_(fkt, data, data_len);
   }
 };
 
