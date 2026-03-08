@@ -172,11 +172,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   static bool check_lrc_(uint8_t *frame, int len) {
-    // LRC = somme de MSGT(frame[1]) jusqu'a ETX(frame[len-3]) inclus, modulo 256
+    // LRC = somme de MSGT(frame[1]) jusqu'a ETX(frame[len-3]) inclus, modulo 128
+    // Le bit 7 peut être parasite sur le LRC reçu, on compare sur 7 bits
     uint8_t sum = 0;
     for (int i = 1; i <= len - 3; i++) sum += frame[i];
-    uint8_t lrc = frame[len - 2];
-    return sum == lrc;
+    uint8_t lrc = frame[len - 2] & 0x7F;
+    return (sum & 0x7F) == lrc;
   }
 
   // ---- Serial reception ----
