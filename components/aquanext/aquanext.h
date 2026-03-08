@@ -77,6 +77,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void setup() override {}
 
   void loop() override {
+    process_tx_queue_();
     read_serial_();
   }
 
@@ -152,6 +153,34 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   bool    in_frame_     = false;
   int     expected_len_ = 0;
   uint8_t current_settings_ = 0x00;
+
+  // ---- TX queue (evite les envois simultanees qui corrompent les reponses) ----
+  static const int TX_QUEUE_SIZE = 16;
+  int     tx_queue_[TX_QUEUE_SIZE];
+  int     tx_queue_head_ = 0;
+  int     tx_queue_tail_ = 0;
+  uint32_t tx_last_ms_   = 0;
+  static const uint32_t TX_MIN_DELAY_MS = 600;  // delai minimum entre deux TX
+
+  void enqueue_read_(int fkt) {
+    int next = (tx_queue_tail_ + 1) % TX_QUEUE_SIZE;
+    if (next == tx_queue_head_) {
+      ESP_LOGW("aquanext", "TX queue pleine, FKT=%03X ignore", fkt);
+      return;
+    }
+    tx_queue_[tx_queue_tail_] = fkt;
+    tx_queue_tail_ = next;
+  }
+
+  void process_tx_queue_() {
+    if (tx_queue_head_ == tx_queue_tail_) return;  // queue vide
+    uint32_t now = millis();
+    if (now - tx_last_ms_ < TX_MIN_DELAY_MS) return;  // trop tot
+    int fkt = tx_queue_[tx_queue_head_];
+    tx_queue_head_ = (tx_queue_head_ + 1) % TX_QUEUE_SIZE;
+    tx_last_ms_ = now;
+    build_read_(fkt);
+  }
 
   // ---- Utilities ----
 
@@ -449,7 +478,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   void request_function_(int fkt) {
-    build_read_(fkt);
+    enqueue_read_(fkt);
   }
 
   void send_confirm_(int fkt, uint8_t *data, int data_len) {
