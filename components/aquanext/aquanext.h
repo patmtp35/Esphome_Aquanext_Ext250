@@ -197,8 +197,9 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       } else if (in_frame_) {
         if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;  // stocke RAW pour LRC correct
 
-        // Fin de trame : CR = 0x0D ou 0x8D (bit 7 parasite)
-        if (b == JANUS_CR) {
+        // Fin de trame : 0x0D, 0x8D (bit7 parasite), ou 0xF8 (fin proprietaire)
+        bool is_cr = (b == JANUS_CR) || (raw == 0xF8);
+        if (is_cr) {
           rx_buf_[rx_idx_ - 1] = JANUS_CR;  // normalise le CR
           in_frame_ = false;
           decode_frame_(rx_buf_, rx_idx_);
