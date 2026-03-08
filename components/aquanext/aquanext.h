@@ -463,7 +463,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     write_array(frame, idx);
     flush();
-    echo_skip_ = idx;  // on va recevoir ces idx octets en echo, on les ignore
+    // echo_skip_ desactive : l'ADUM1201 isole le bus, pas d'echo TX en RX
   }
 
   void build_write_(int fkt, uint8_t *data, int data_len) {
@@ -508,7 +508,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     write_array(frame, idx);
     flush();
-    echo_skip_ = idx;  // on va recevoir ces idx octets en echo, on les ignore
+    // echo_skip_ desactive : l'ADUM1201 isole le bus, pas d'echo TX en RX
   }
 
   void request_function_(int fkt) {
