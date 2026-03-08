@@ -82,7 +82,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  // ---- Public control API (called from lambda in YAML) ----
+  // ---- Public control API ----
 
   void set_power(bool on) {
     uint8_t data = on ? 0x01 : 0x00;
@@ -108,14 +108,14 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
   void set_target_temp(float temp) {
     if (temp < 30.0f || temp > 65.0f) {
-      ESP_LOGW("aquanext", "Température hors limites : %.1f", temp);
+      ESP_LOGW("aquanext", "Temperature hors limites : %.1f", temp);
       return;
     }
     uint8_t int_part  = (uint8_t)temp;
     uint8_t frac_part = (uint8_t)((temp - int_part) * 255.0f);
     uint8_t data[2]   = {int_part, frac_part};
     send_confirm_(FKT_TARGET_TEMP, data, 2);
-    ESP_LOGI("aquanext", "set_target_temp -> %.2f°C", temp);
+    ESP_LOGI("aquanext", "set_target_temp -> %.2f C", temp);
   }
 
   void set_antibact(bool on) {
@@ -172,8 +172,8 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   static bool check_lrc_(uint8_t *frame, int len) {
-    // LRC = somme de MSGT(frame[1]) jusqu'a ETX(frame[len-3]) inclus, modulo 128
-    // Le bit 7 peut être parasite sur le LRC reçu, on compare sur 7 bits
+    // LRC = somme de MSGT(frame[1]) jusqu'a ETX(frame[len-3]) inclus
+    // Comparaison sur 7 bits car bit 7 peut etre parasite sur le LRC recu
     uint8_t sum = 0;
     for (int i = 1; i <= len - 3; i++) sum += frame[i];
     uint8_t lrc = frame[len - 2] & 0x7F;
@@ -184,18 +184,22 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void read_serial_() {
     while (available()) {
 
-      uint8_t b = read() & 0x7F;  // Masque bit 7 (bit de parité parasite)
+      uint8_t raw = read();
+      uint8_t b   = raw & 0x7F;  // masque pour detection STX/CR
 
-      ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", b);
+      ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", raw);
 
       if (b == JANUS_STX) {
+        // Debut de trame
         rx_idx_ = 0;
         in_frame_ = true;
-        rx_buf_[rx_idx_++] = b;
+        rx_buf_[rx_idx_++] = JANUS_STX;  // STX propre
       } else if (in_frame_) {
-        if (rx_idx_ < 64) rx_buf_[rx_idx_++] = b;
+        if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;  // stocke RAW pour LRC correct
 
+        // Fin de trame : CR = 0x0D ou 0x8D (bit 7 parasite)
         if (b == JANUS_CR) {
+          rx_buf_[rx_idx_ - 1] = JANUS_CR;  // normalise le CR
           in_frame_ = false;
           decode_frame_(rx_buf_, rx_idx_);
           rx_idx_ = 0;
@@ -211,20 +215,27 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     if (frame[0] != JANUS_STX) return;
     if (frame[len - 1] != JANUS_CR) return;
     if (!check_lrc_(frame, len)) {
-      ESP_LOGW("aquanext", "LRC invalide");
+      ESP_LOGW("aquanext", "LRC invalide (len=%d)", len);
+      // Log la trame pour debug
+      char logbuf[200];
+      int pos = 0;
+      for (int i = 0; i < len && pos < 190; i++)
+        pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, "%02X ", frame[i]);
+      ESP_LOGW("aquanext", "Frame: %s", logbuf);
       return;
     }
 
-    uint8_t msgt = frame[1];
-    char fkt_str[4] = {(char)frame[2], (char)frame[3], (char)frame[4], 0};
+    uint8_t msgt = frame[1] & 0x7F;  // masque MSGT aussi
+    char fkt_str[4] = {(char)(frame[2] & 0x7F), (char)(frame[3] & 0x7F), (char)(frame[4] & 0x7F), 0};
     int fkt = strtol(fkt_str, nullptr, 16);
-    // Structure: STX(0) MSGT(1) FKT(2,3,4) PAD(5,6) LEN(7,8) DATA(9..) ETX LRC CR
-    int data_len = hex_to_byte_(frame[7], frame[8]);
+    int data_len = hex_to_byte_(frame[7] & 0x7F, frame[8] & 0x7F);
 
     uint8_t data[16] = {};
     for (int i = 0; i < data_len && i < 16; i++) {
-      data[i] = hex_to_byte_(frame[9 + i * 2], frame[10 + i * 2]);
+      data[i] = hex_to_byte_(frame[9 + i * 2] & 0x7F, frame[10 + i * 2] & 0x7F);
     }
+
+    ESP_LOGD("aquanext", "Frame OK: MSGT=0x%02X FKT=%03X data_len=%d", msgt, fkt, data_len);
 
     if (msgt != JANUS_MSGT_READ) return;
 
@@ -232,7 +243,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
       case FKT_STATUS: {
         if (data_len < 7) break;
-        // DATA: TargetTemp(2) | Unknown(2) | DomeTemp(2) | Status1 | Program | Symbols | Status4
         float t_target = decode_temp_(data[0], data[1]);
         float t_dome   = decode_temp_(data[4], data[5]);
         uint8_t program = data[7];
@@ -255,15 +265,19 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
           mode_text_sensor_->publish_state(mode_str);
         }
 
-        if (power_binary_sensor_)        power_binary_sensor_->publish_state(symbols & 0x01);
-        if (heat_pump_active_binary_sensor_) heat_pump_active_binary_sensor_->publish_state(symbols & 0x02);
-        if (heat_element_active_binary_sensor_) heat_element_active_binary_sensor_->publish_state(symbols & 0x04);
+        if (power_binary_sensor_)
+          power_binary_sensor_->publish_state(symbols & 0x01);
+        if (heat_pump_active_binary_sensor_)
+          heat_pump_active_binary_sensor_->publish_state(symbols & 0x02);
+        if (heat_element_active_binary_sensor_)
+          heat_element_active_binary_sensor_->publish_state(symbols & 0x04);
         break;
       }
 
       case FKT_ERRORS: {
         bool any_error = (data[1] || data[2] || data[3]);
-        if (error_present_binary_sensor_) error_present_binary_sensor_->publish_state(any_error);
+        if (error_present_binary_sensor_)
+          error_present_binary_sensor_->publish_state(any_error);
         ESP_LOGD("aquanext", "Errors: %02X %02X %02X", data[1], data[2], data[3]);
         break;
       }
@@ -317,24 +331,20 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     frame[idx++] = JANUS_STX;
     frame[idx++] = msgt;
 
-    // FKT ASCII HEX sur 3 caractères
     char fkt_str[4];
     snprintf(fkt_str, sizeof(fkt_str), "%03X", fkt);
     frame[idx++] = fkt_str[0];
     frame[idx++] = fkt_str[1];
     frame[idx++] = fkt_str[2];
 
-    // padding
     frame[idx++] = '0';
     frame[idx++] = '0';
 
-    // LEN ASCII HEX sur 2 caractères
     char len_str[3];
     snprintf(len_str, sizeof(len_str), "%02X", len_field);
     frame[idx++] = len_str[0];
     frame[idx++] = len_str[1];
 
-    // DATA (encodée en ASCII HEX)
     for (int i = 0; i < data_len; i++) {
       char hex[3];
       snprintf(hex, sizeof(hex), "%02X", data[i]);
@@ -344,22 +354,20 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     frame[idx++] = JANUS_ETX;
 
-    // LRC binaire : somme de MSGT(frame[1]) jusqu'à ETX inclus
+    // LRC : somme de frame[1] (MSGT) jusqu'a ETX inclus
     uint8_t lrc = 0;
     for (int i = 1; i < idx; i++) {
       lrc += frame[i];
     }
     frame[idx++] = lrc;
-
     frame[idx++] = JANUS_CR;
 
     // debug TX
     char logbuf[200];
     int pos = 0;
     pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, "TX raw:");
-    for (int i = 0; i < idx && pos < (int) sizeof(logbuf) - 4; i++) {
+    for (int i = 0; i < idx && pos < (int)sizeof(logbuf) - 4; i++)
       pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", frame[i]);
-    }
     ESP_LOGD("aquanext", "%s", logbuf);
 
     write_array(frame, idx);
