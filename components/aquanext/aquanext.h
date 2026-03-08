@@ -151,6 +151,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   uint8_t rx_buf_[64];
   int rx_idx_ = 0;
   bool in_frame_ = false;
+  bool etx_seen_ = false;   // ETX recu, prochain octet = LRC
   uint8_t current_settings_ = 0x00;
 
   // ---- Utilities ----
@@ -181,29 +182,44 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Serial reception ----
+  // Protocole Janus2 : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC [CR optionnel]
+  // Le CR final est parfois absent ou corrompu - on cloture apres LRC (octet apres ETX)
   void read_serial_() {
     while (available()) {
 
       uint8_t raw = read();
-      uint8_t b   = raw & 0x7F;  // masque pour detection STX/CR
+      uint8_t b   = raw & 0x7F;
 
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", raw);
 
       if (b == JANUS_STX) {
-        // Debut de trame
+        // Nouveau STX : debut de trame (meme si on etait deja dans une trame)
         rx_idx_ = 0;
         in_frame_ = true;
-        rx_buf_[rx_idx_++] = JANUS_STX;  // STX propre
+        etx_seen_ = false;
+        rx_buf_[rx_idx_++] = JANUS_STX;
       } else if (in_frame_) {
-        if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;  // stocke RAW pour LRC correct
 
-        // Fin de trame : 0x0D, 0x8D (bit7 parasite), ou 0xF8 (fin proprietaire)
-        bool is_cr = (b == JANUS_CR) || (raw == 0xF8);
-        if (is_cr) {
-          rx_buf_[rx_idx_ - 1] = JANUS_CR;  // normalise le CR
+        if (etx_seen_) {
+          // Octet apres ETX = LRC, on cloture la trame ici
+          if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;  // stocke LRC raw
+          // Ajoute un CR synthetique pour satisfaire decode_frame_
+          if (rx_idx_ < 64) rx_buf_[rx_idx_++] = JANUS_CR;
           in_frame_ = false;
+          etx_seen_ = false;
           decode_frame_(rx_buf_, rx_idx_);
           rx_idx_ = 0;
+          // Si ce byte etait aussi un STX (0x02), on le retraite
+          if (b == JANUS_STX) {
+            rx_idx_ = 0;
+            in_frame_ = true;
+            rx_buf_[rx_idx_++] = JANUS_STX;
+          }
+        } else {
+          if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;
+          if (b == JANUS_ETX) {
+            etx_seen_ = true;
+          }
         }
       }
     }
