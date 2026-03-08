@@ -257,10 +257,20 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       if (rx_idx_ == 9) {
         uint8_t len_hi = rx_buf_[7] & 0x7F;
         uint8_t len_lo = rx_buf_[8] & 0x7F;
-        // Securite: LEN ASCII hex valide uniquement ('0'-'9','A'-'F')
-        bool len_valid = ((len_hi >= '0' && len_hi <= '9') || (len_hi >= 'A' && len_hi <= 'F'))
-                      && ((len_lo >= '0' && len_lo <= '9') || (len_lo >= 'A' && len_lo <= 'F'));
-        uint8_t data_len = len_valid ? hex_to_byte_(len_hi, len_lo) : 0;
+        // Certains octets arrivent avec leurs bits inverses (MSB/LSB inversion sur bus Janus2)
+        // Si le char n'est pas ASCII hex valide, tenter de reverser les bits
+        auto fix_nibble = [](uint8_t c) -> uint8_t {
+          if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) return c;
+          // reverse bits
+          uint8_t r = 0;
+          for (int i = 0; i < 8; i++) r |= ((c >> i) & 1) << (7 - i);
+          r &= 0x7F;
+          if ((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F')) return r;
+          return 0x30;  // fallback '0'
+        };
+        len_hi = fix_nibble(len_hi);
+        len_lo = fix_nibble(len_lo);
+        uint8_t data_len = hex_to_byte_(len_hi, len_lo);
         // Sanity check: data_len > 16 est suspect (trame corrompue)
         // On plafonne a 16 octets de data max (32 chars ASCII)
         if (data_len > 16) {
@@ -315,19 +325,30 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       ESP_LOGD("aquanext", "LRC invalide (decode quand meme): %s", logbuf);
     }
 
+    // fix_nibble: si le char ASCII hex est invalide, tenter reverse bits
+    auto fix_nibble = [](uint8_t c) -> uint8_t {
+      c &= 0x7F;
+      if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) return c;
+      uint8_t r = 0;
+      for (int i = 0; i < 8; i++) r |= ((c >> i) & 1) << (7 - i);
+      r &= 0x7F;
+      if ((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F') || (r >= 'a' && r <= 'f')) return r;
+      return '0';
+    };
+
     uint8_t msgt    = frame[1] & 0x7F;
     char fkt_str[4] = {
-      (char)(frame[2] & 0x7F),
-      (char)(frame[3] & 0x7F),
-      (char)(frame[4] & 0x7F),
+      (char)fix_nibble(frame[2]),
+      (char)fix_nibble(frame[3]),
+      (char)fix_nibble(frame[4]),
       0
     };
     int  fkt      = strtol(fkt_str, nullptr, 16);
-    int  data_len = hex_to_byte_(frame[7] & 0x7F, frame[8] & 0x7F);
+    int  data_len = hex_to_byte_(fix_nibble(frame[7]), fix_nibble(frame[8]));
 
     uint8_t data[16] = {};
     for (int i = 0; i < data_len && i < 16; i++) {
-      data[i] = hex_to_byte_(frame[9 + i * 2] & 0x7F, frame[10 + i * 2] & 0x7F);
+      data[i] = hex_to_byte_(fix_nibble(frame[9 + i * 2]), fix_nibble(frame[10 + i * 2]));
     }
 
     ESP_LOGD("aquanext", "Frame OK: MSGT=0x%02X FKT=%03X data_len=%d", msgt, fkt, data_len);
