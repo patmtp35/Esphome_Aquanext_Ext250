@@ -151,7 +151,8 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   uint8_t rx_buf_[64];
   int rx_idx_ = 0;
   bool in_frame_ = false;
-  bool etx_seen_ = false;   // ETX recu, prochain octet = LRC
+  bool etx_seen_ = false;
+  int expected_len_ = 0;   // longueur de trame calculee depuis LEN
   uint8_t current_settings_ = 0x00;
 
   // ---- Utilities ----
@@ -182,8 +183,10 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Serial reception ----
-  // Protocole Janus2 : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC [CR optionnel]
-  // Le CR final est parfois absent ou corrompu - on cloture apres LRC (octet apres ETX)
+  // Protocole Janus2 : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC CR
+  // longueur fixe = 12 + data_len*2 octets
+  // On calcule la longueur attendue des que LEN est connu (pos 7+8)
+  // et on cloture exactement a cette longueur
   void read_serial_() {
     while (available()) {
 
@@ -193,33 +196,33 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", raw);
 
       if (b == JANUS_STX) {
-        // Nouveau STX : debut de trame (meme si on etait deja dans une trame)
         rx_idx_ = 0;
         in_frame_ = true;
-        etx_seen_ = false;
+        expected_len_ = 0;
         rx_buf_[rx_idx_++] = JANUS_STX;
       } else if (in_frame_) {
+        if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;
 
-        if (etx_seen_) {
-          // Octet apres ETX = LRC, on cloture la trame ici
-          if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;  // stocke LRC raw
-          // Ajoute un CR synthetique pour satisfaire decode_frame_
-          if (rx_idx_ < 64) rx_buf_[rx_idx_++] = JANUS_CR;
+        // Des que LEN est recu (pos 7 et 8), calcule longueur attendue
+        if (rx_idx_ == 9) {
+          uint8_t hi = rx_buf_[7] & 0x7F;
+          uint8_t lo = rx_buf_[8] & 0x7F;
+          uint8_t data_len = hex_to_byte_(hi, lo);
+          // STX(1) MSGT(1) FKT(3) PAD(2) LEN(2) DATA(data_len*2) ETX(1) LRC(1) CR(1)
+          expected_len_ = 12 + data_len * 2;
+          ESP_LOGD("aquanext", "Trame attendue: %d octets (data_len=%d)", expected_len_, data_len);
+        }
+
+        // Cloture si longueur atteinte
+        if (expected_len_ > 0 && rx_idx_ >= expected_len_) {
+          // Normalise LRC (masque bit7) et ajoute CR synthetique
+          uint8_t lrc_raw = rx_buf_[expected_len_ - 2];
+          rx_buf_[expected_len_ - 2] = lrc_raw;  // garde LRC tel quel
+          rx_buf_[expected_len_ - 1] = JANUS_CR; // normalise CR
+          int frame_len = rx_idx_;  // longueur reelle stockee
           in_frame_ = false;
-          etx_seen_ = false;
-          decode_frame_(rx_buf_, rx_idx_);
           rx_idx_ = 0;
-          // Si ce byte etait aussi un STX (0x02), on le retraite
-          if (b == JANUS_STX) {
-            rx_idx_ = 0;
-            in_frame_ = true;
-            rx_buf_[rx_idx_++] = JANUS_STX;
-          }
-        } else {
-          if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;
-          if (b == JANUS_ETX) {
-            etx_seen_ = true;
-          }
+          decode_frame_(rx_buf_, frame_len);
         }
       }
     }
