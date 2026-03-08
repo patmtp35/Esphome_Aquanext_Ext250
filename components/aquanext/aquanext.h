@@ -200,18 +200,21 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     return (hex_char_to_nibble_(hi) << 4) | hex_char_to_nibble_(lo);
   }
 
-  static float decode_temp_(uint8_t hi, uint8_t lo) {
-    if (hi == JANUS_TEMP_NC_HI && lo == JANUS_TEMP_NC_LO) return NAN;
-    return (float)hi + (float)lo / 255.0f;
+  static float decode_temp_(uint8_t frac, uint8_t deg) {
+    // Doc Janus2: bytes "4033" -> data[0]=0x40(frac), data[1]=0x33(deg=51)
+    // Formule: deg + frac/255 = 51 + 64/255 = 51.25°C
+    if (frac == JANUS_TEMP_NC_HI && deg == JANUS_TEMP_NC_LO) return NAN;
+    if (deg == JANUS_TEMP_NC_HI && frac == JANUS_TEMP_NC_LO) return NAN;
+    return (float)deg + (float)frac / 255.0f;
   }
 
   static bool check_lrc_(uint8_t *frame, int len) {
-    // LRC = somme des octets BRUTS de frame[1] (MSGT) jusqu'a frame[len-2] (ETX)
-    // Le bit 7 peut etre a 1 sur n'importe quel octet (bit de parité MARK du Janus2)
-    // On compare modulo 128 (& 0x7F) pour absorber ce bit parasite sur le LRC lui-meme
+    // LRC = somme 1 octet de tous les octets apres STX jusqu'a ETX inclus
+    // Doc Janus2: "1 byte sum over all transmitted bytes after STX (including ETX)"
+    // Exemple doc: 0x028E & 0xFF = 0x8E
     uint8_t sum = 0;
     for (int i = 1; i <= len - 2; i++) sum += frame[i];
-    return (sum & 0x7F) == (frame[len - 1] & 0x7F);
+    return (sum & 0xFF) == (frame[len - 1] & 0xFF);
   }
 
   // ---- Serial reception ----
@@ -257,19 +260,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       if (rx_idx_ == 9) {
         uint8_t len_hi = rx_buf_[7] & 0x7F;
         uint8_t len_lo = rx_buf_[8] & 0x7F;
-        // Certains octets arrivent avec leurs bits inverses (MSB/LSB inversion sur bus Janus2)
-        // Si le char n'est pas ASCII hex valide, tenter de reverser les bits
-        auto fix_nibble = [](uint8_t c) -> uint8_t {
-          if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) return c;
-          // reverse bits
-          uint8_t r = 0;
-          for (int i = 0; i < 8; i++) r |= ((c >> i) & 1) << (7 - i);
-          r &= 0x7F;
-          if ((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F')) return r;
-          return 0x30;  // fallback '0'
-        };
-        len_hi = fix_nibble(len_hi);
-        len_lo = fix_nibble(len_lo);
         uint8_t data_len = hex_to_byte_(len_hi, len_lo);
         // Sanity check: data_len > 16 est suspect (trame corrompue)
         // On plafonne a 16 octets de data max (32 chars ASCII)
@@ -325,35 +315,30 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       ESP_LOGD("aquanext", "LRC invalide (decode quand meme): %s", logbuf);
     }
 
-    // fix_nibble: si le char ASCII hex est invalide, tenter reverse bits
-    auto fix_nibble = [](uint8_t c) -> uint8_t {
-      c &= 0x7F;
-      if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) return c;
-      uint8_t r = 0;
-      for (int i = 0; i < 8; i++) r |= ((c >> i) & 1) << (7 - i);
-      r &= 0x7F;
-      if ((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F') || (r >= 'a' && r <= 'f')) return r;
-      return '0';
-    };
-
-    uint8_t msgt    = frame[1] & 0x7F;
+    // MSGT est transmis avec bit7=1 intentionnellement (ex: 0xC1 dans la doc)
+    // On compare directement sans masque
+    uint8_t msgt    = frame[1];
     char fkt_str[4] = {
-      (char)fix_nibble(frame[2]),
-      (char)fix_nibble(frame[3]),
-      (char)fix_nibble(frame[4]),
+      (char)(frame[2] & 0x7F),
+      (char)(frame[3] & 0x7F),
+      (char)(frame[4] & 0x7F),
       0
     };
     int  fkt      = strtol(fkt_str, nullptr, 16);
-    int  data_len = hex_to_byte_(fix_nibble(frame[7]), fix_nibble(frame[8]));
+    int  data_len = hex_to_byte_(frame[7] & 0x7F, frame[8] & 0x7F);
 
     uint8_t data[16] = {};
     for (int i = 0; i < data_len && i < 16; i++) {
-      data[i] = hex_to_byte_(fix_nibble(frame[9 + i * 2]), fix_nibble(frame[10 + i * 2]));
+      data[i] = hex_to_byte_(frame[9 + i * 2] & 0x7F, frame[10 + i * 2] & 0x7F);
     }
 
     ESP_LOGD("aquanext", "Frame OK: MSGT=0x%02X FKT=%03X data_len=%d", msgt, fkt, data_len);
 
-    if (msgt != JANUS_MSGT_READ) return;
+    // Accepter 0xC1 (READ response) et 0xC2 (WRITE confirm)
+    if (msgt != JANUS_MSGT_READ && msgt != JANUS_MSGT_WRITE) {
+      ESP_LOGD("aquanext", "MSGT inconnu 0x%02X, ignore", msgt);
+      return;
+    }
 
     switch (fkt) {
 
@@ -426,15 +411,16 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       }
 
       case FKT_HP_H: {
-        uint32_t mins = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
-                        ((uint32_t)data[2] << 8)  | data[3];
+        // Little endian: "755B0000" -> 0x75,0x5B,0x00,0x00 -> 0x00005B75 = 23413min = 390h
+        uint32_t mins = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                        ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
         if (hp_hours_sensor_) hp_hours_sensor_->publish_state(mins / 60.0f);
         break;
       }
 
       case FKT_HE_H: {
-        uint32_t mins = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
-                        ((uint32_t)data[2] << 8)  | data[3];
+        uint32_t mins = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                        ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
         if (he_hours_sensor_) he_hours_sensor_->publish_state(mins / 60.0f);
         break;
       }
