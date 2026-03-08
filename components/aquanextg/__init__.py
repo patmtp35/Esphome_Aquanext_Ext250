@@ -18,7 +18,7 @@ DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["sensor", "text_sensor", "binary_sensor"]
 
 # Namespace C++
-aquanext_ns = cg.esphome_ns.namespace("aquanext")
+aquanext_ns = cg.esphome_ns.namespace("aquanextg")
 AquaNextComponent = aquanext_ns.class_(
     "AquaNextComponent", cg.Component, uart.UARTDevice
 )
