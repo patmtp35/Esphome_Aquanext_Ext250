@@ -16,7 +16,7 @@ from esphome.const import (
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["sensor", "text_sensor", "binary_sensor"]
 
-# Namespace C++ (doit correspondre au namespace dans aquanextg.h)
+# Namespace C++ (doit correspondre exactement au namespace dans aquanextg.h)
 aquanext_ns = cg.esphome_ns.namespace("aquanext")
 AquaNextComponent = aquanext_ns.class_(
     "AquaNextComponent", cg.Component, uart.UARTDevice
@@ -148,6 +148,7 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     # --- Sensor Registration ---
+    # Pour SUB_SENSOR(name), le setter est set_name_sensor
     sensor_map = {
         CONF_TEMPERATURE_TARGET:  "set_temperature_target_sensor",
         CONF_TEMPERATURE_DOME:    "set_temperature_dome_sensor",
@@ -167,6 +168,8 @@ async def to_code(config):
             s = await sensor.new_sensor(config[key])
             cg.add(getattr(var, setter)(s))
 
+    # --- Text Sensor Registration ---
+    # Pour SUB_TEXT_SENSOR(name), le setter est set_name_text_sensor
     text_map = {
         CONF_MODE:       "set_mode_text_sensor",
         CONF_FW_VERSION: "set_fw_version_text_sensor",
@@ -176,6 +179,8 @@ async def to_code(config):
             s = await text_sensor.new_text_sensor(config[key])
             cg.add(getattr(var, setter)(s))
 
+    # --- Binary Sensor Registration ---
+    # Pour SUB_BINARY_SENSOR(name), le setter est set_name_binary_sensor
     binary_map = {
         CONF_POWER:                "set_power_binary_sensor",
         CONF_HEAT_PUMP_ACTIVE:     "set_heat_pump_active_binary_sensor",

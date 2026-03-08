@@ -88,7 +88,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void set_power(bool on) {
     uint8_t data = on ? 0x01 : 0x00;
     send_confirm_(FKT_ONOFF, &data, 1);
-    ESP_LOGI("aquanext", "set_power -> %s", on ? "ON" : "OFF");
   }
 
   void set_mode(const std::string &mode) {
@@ -97,21 +96,15 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     if (mode == "green")        s |= SETTING_GREEN;
     else if (mode == "voyage")  s |= SETTING_VOYAGE;
     send_confirm_(FKT_SETTINGS, &s, 1);
-    ESP_LOGI("aquanext", "set_mode -> %s (0x%02X)", mode.c_str(), s);
   }
 
   void set_target_temp(float temp) {
     if (temp < 30.0f || temp > 65.0f) return;
     uint8_t int_part  = (uint8_t)temp;
     uint8_t frac_part = (uint8_t)((temp - int_part) * 255.0f);
-    uint8_t data[2]   = {frac_part, int_part}; // Inversion pour correspondre à la doc
+    // DOC: HI=frac, LO=int
+    uint8_t data[2]   = {frac_part, int_part};
     send_confirm_(FKT_TARGET_TEMP, data, 2);
-  }
-
-  void set_antibact(bool on) {
-    uint8_t s = current_settings_;
-    if (on) s |= SETTING_ANTIBACT; else s &= ~SETTING_ANTIBACT;
-    send_confirm_(FKT_SETTINGS, &s, 1);
   }
 
   void request_all_temps() {
@@ -121,7 +114,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   void request_function(int fkt) {
-    request_function_(fkt);
+    enqueue_read_(fkt);
   }
 
  protected:
@@ -130,7 +123,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   bool    in_frame_     = false;
   int     expected_len_ = 0;
   uint8_t current_settings_ = 0x00;
-  int     echo_skip_    = 0;
 
   static const int TX_QUEUE_SIZE = 16;
   int     tx_queue_[TX_QUEUE_SIZE];
@@ -168,17 +160,16 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     return (hex_char_to_nibble_(hi) << 4) | hex_char_to_nibble_(lo);
   }
 
-  // --- CORRECTION TEMPERATURE (Doc: hi=décimales, lo=entier) ---
+  // CORRECTION: DOC Ariston dit HI = Decimales, LO = Entier
   static float decode_temp_(uint8_t hi, uint8_t lo) {
     if (hi == JANUS_TEMP_NC_HI && lo == JANUS_TEMP_NC_LO) return NAN;
     return (float)lo + (float)hi / 255.0f;
   }
 
-  // --- CORRECTION LRC (Doc: Somme MSGT à ETX inclus, modulo 256) ---
   static bool check_lrc_(uint8_t *frame, int len) {
-    uint32_t sum = 0;
+    uint8_t sum = 0;
     for (int i = 1; i <= len - 2; i++) sum += (frame[i] & 0x7F);
-    return (uint8_t)(sum & 0xFF) == (frame[len - 1] & 0x7F);
+    return (sum & 0x7F) == (frame[len - 1] & 0x7F);
   }
 
   void read_serial_() {
@@ -199,22 +190,45 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       }
 
       if (rx_idx_ >= 11 && (rx_buf_[rx_idx_ - 2] & 0x7F) == JANUS_ETX) {
-        int frame_len = rx_idx_; in_frame_ = false; rx_idx_ = 0;
-        decode_frame_(rx_buf_, frame_len);
+        decode_frame_(rx_buf_, rx_idx_);
+        in_frame_ = false; rx_idx_ = 0;
       }
     }
   }
 
   void decode_frame_(uint8_t *frame, int len) {
     if (len < 11 || frame[0] != JANUS_STX) return;
-    if (!check_lrc_(frame, len)) { ESP_LOGD("aquanext", "LRC Invalide"); }
+    
+    // On affiche la trame brute pour comprendre ce qui arrive
+    char logbuf[128];
+    int pos = 0;
+    for (int i = 0; i < len && pos < 120; i++)
+      pos += snprintf(logbuf + pos, 128 - pos, "%02X ", frame[i]);
+    
+    if (!check_lrc_(frame, len)) {
+       ESP_LOGD("aquanext", "LRC Invalide sur : %s", logbuf);
+       // ON CONTINUE QUAND MÊME LE DÉCODAGE
+    } else {
+       ESP_LOGD("aquanext", "LRC OK sur : %s", logbuf);
+    }
 
     uint8_t msgt = frame[1] & 0x7F;
     char fkt_str[4] = {(char)(frame[2]&0x7F), (char)(frame[3]&0x7F), (char)(frame[4]&0x7F), 0};
     int fkt = strtol(fkt_str, nullptr, 16);
     int d_len = hex_to_byte_(frame[7]&0x7F, frame[8]&0x7F);
-    uint8_t data[16] = {0};
-    for (int i = 0; i < d_len && i < 16; i++) data[i] = hex_to_byte_(frame[9+i*2]&0x7F, frame[10+i*2]&0x7F);
+
+    // Si d_len est délirant, on arrête
+    if (d_len > 16) return;
+
+    uint8_t data[16] = {};
+    for (int i = 0; i < d_len; i++) {
+      data[i] = hex_to_byte_(frame[9+i*2]&0x7F, frame[10+i*2]&0x7F);
+    }
+
+    // Log des infos extraites
+    ESP_LOGD("aquanext", "Decodage: MSGT=%02X FKT=%03X Len=%d", msgt, fkt, d_len);
+
+    // ... (le reste du switch fkt ne change pas)
 
     if (msgt != JANUS_MSGT_READ) return;
 
@@ -222,10 +236,10 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       case FKT_STATUS:
         if (d_len < 9) break;
         if (temperature_target_sensor_) temperature_target_sensor_->publish_state(decode_temp_(data[0], data[1]));
-        if (temperature_dome_sensor_) temperature_dome_sensor_->publish_state(decode_temp_(data[4], data[5]));
+        if (temperature_dome_sensor_)   temperature_dome_sensor_->publish_state(decode_temp_(data[4], data[5]));
         if (mode_text_sensor_) {
-            const char* modes[] = {"boost", "green", "voyage", "auto"};
-            mode_text_sensor_->publish_state(data[7] < 4 ? modes[data[7]] : "unknown");
+          const char* modes[] = {"boost", "green", "voyage", "auto"};
+          mode_text_sensor_->publish_state(data[7] < 4 ? modes[data[7]] : "unknown");
         }
         if (power_binary_sensor_) power_binary_sensor_->publish_state(data[8] & 0x01);
         if (heat_pump_active_binary_sensor_) heat_pump_active_binary_sensor_->publish_state(data[8] & 0x02);
@@ -235,28 +249,31 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       case FKT_SETTINGS:
         current_settings_ = data[0];
         if (setting_antibact_binary_sensor_) setting_antibact_binary_sensor_->publish_state(data[0] & SETTING_ANTIBACT);
-        if (setting_green_binary_sensor_) setting_green_binary_sensor_->publish_state(data[0] & SETTING_GREEN);
-        if (setting_voyage_binary_sensor_) setting_voyage_binary_sensor_->publish_state(data[0] & SETTING_VOYAGE);
+        if (setting_green_binary_sensor_)    setting_green_binary_sensor_->publish_state(data[0] & SETTING_GREEN);
+        if (setting_voyage_binary_sensor_)   setting_voyage_binary_sensor_->publish_state(data[0] & SETTING_VOYAGE);
         break;
 
-      case FKT_T_AIR:  if (temperature_air_sensor_) temperature_air_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
+      case FKT_T_AIR:  if (temperature_air_sensor_)  temperature_air_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
       case FKT_T_EVAP: if (temperature_evap_sensor_) temperature_evap_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
-      case FKT_TW1:    if (temperature_tw1_sensor_) temperature_tw1_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
-      case FKT_TW2:    if (temperature_tw2_sensor_) temperature_tw2_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
+      case FKT_TW1:    if (temperature_tw1_sensor_)  temperature_tw1_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
+      case FKT_TW2:    if (temperature_tw2_sensor_)  temperature_tw2_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
+      case FKT_TW3:    if (temperature_tw3_sensor_)  temperature_tw3_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
+      case FKT_T_HP:   if (temperature_t_hp_sensor_) temperature_t_hp_sensor_->publish_state(decode_temp_(data[0], data[1])); break;
 
-      // --- CORRECTION HEURES (Doc: 4 octets, Little Endian, minutes / 60) ---
+      // CORRECTION: DOC dit format 4 octets Little Endian pour les minutes
       case FKT_HP_H:
       case FKT_HE_H: {
         uint32_t mins = ((uint32_t)data[3] << 24) | ((uint32_t)data[2] << 16) | ((uint32_t)data[1] << 8) | data[0];
-        if (fkt == FKT_HP_H && hp_hours_sensor_) hp_hours_sensor_->publish_state(mins / 60.0f);
-        if (fkt == FKT_HE_H && he_hours_sensor_) he_hours_sensor_->publish_state(mins / 60.0f);
+        float hours = mins / 60.0f;
+        if (fkt == FKT_HP_H && hp_hours_sensor_) hp_hours_sensor_->publish_state(hours);
+        if (fkt == FKT_HE_H && he_hours_sensor_) he_hours_sensor_->publish_state(hours);
         break;
       }
     }
   }
 
   void build_read_(int fkt) {
-    uint8_t frame[80]; int idx = 0;
+    uint8_t frame[24]; int idx = 0;
     for (int i = 0; i < 7; i++) frame[idx++] = 0xFF;
     frame[idx++] = JANUS_STX;
     frame[idx++] = JANUS_MSGT_READ;
@@ -265,13 +282,14 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     frame[idx++] = '0'; frame[idx++] = '0'; // PAD
     frame[idx++] = '0'; frame[idx++] = '1'; // LEN
     frame[idx++] = JANUS_ETX;
-    uint8_t lrc = 0; for (int i = 8; i < idx; i++) lrc += frame[i];
-    frame[idx++] = lrc; frame[idx++] = JANUS_CR;
+    uint8_t lrc = 0; for (int i = 8; i < idx; i++) lrc += (frame[i] & 0x7F);
+    frame[idx++] = (lrc & 0x7F);
+    frame[idx++] = JANUS_CR;
     write_array(frame, idx);
   }
 
-  void build_write_(int fkt, uint8_t *data, int data_len) {
-    uint8_t frame[80]; int idx = 0;
+  void send_confirm_(int fkt, uint8_t *data, int data_len) {
+    uint8_t frame[40]; int idx = 0;
     for (int i = 0; i < 7; i++) frame[idx++] = 0xFF;
     frame[idx++] = JANUS_STX;
     frame[idx++] = JANUS_MSGT_WRITE;
@@ -284,13 +302,11 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         frame[idx++] = h[0]; frame[idx++] = h[1];
     }
     frame[idx++] = JANUS_ETX;
-    uint8_t lrc = 0; for (int i = 8; i < idx; i++) lrc += frame[i];
-    frame[idx++] = lrc; frame[idx++] = JANUS_CR;
+    uint8_t lrc = 0; for (int i = 8; i < idx; i++) lrc += (frame[i] & 0x7F);
+    frame[idx++] = (lrc & 0x7F);
+    frame[idx++] = JANUS_CR;
     write_array(frame, idx);
   }
-
-  void request_function_(int fkt) { enqueue_read_(fkt); }
-  void send_confirm_(int fkt, uint8_t *data, int data_len) { build_write_(fkt, data, data_len); }
 };
 
 } // namespace aquanext
