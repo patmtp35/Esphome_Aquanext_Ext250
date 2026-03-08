@@ -186,6 +186,9 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void read_serial_() {
     while (available()) {
       uint8_t raw = read();
+      // Ignore les 0xFF : ce sont les echos de notre propre preambule (bus half-duplex)
+      if (raw == 0xFF) continue;
+
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", raw);
 
       // STX strict : uniquement 0x02 brut (0x82 = MSGT corrompu, pas un STX)
