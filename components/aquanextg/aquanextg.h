@@ -166,47 +166,51 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   void decode_frame_(uint8_t *f, int len) {
-    // Debug trame pour comprendre le LRC
+    // Debug pour voir la trame
     char b[128]; int p=0;
     for(int i=0; i<len && p<120; i++) p+=snprintf(b+p, 128-p, "%02X ", f[i]);
     
-    uint8_t sum=0; for(int i=1; i<=len-2; i++) sum+=(f[i]&0x7F);
-    bool ok = (sum&0x7F) == (f[len-1]&0x7F);
+    // On ignore les trames trop courtes (bruit)
+    if (len < 10) return;
 
-    if (!ok) ESP_LOGD("aquanext", "LRC Invalide: %s", b);
-    // On décode quand même car le bus est bruité
-    
+    // Extraction du type de message (on masque le bit 7)
     uint8_t msgt = f[1] & 0x7F;
+    
+    // Extraction de la fonction (FKT) en ASCII
     char fs[4] = {(char)(f[2]&0x7F), (char)(f[3]&0x7F), (char)(f[4]&0x7F), 0};
     int fkt = strtol(fs, nullptr, 16);
+
+    // Extraction de la longueur de données (Position 7 et 8 pour READ)
+    // Attention: sur une REPONSE, la structure peut différer
     int d_len = hex_to_byte_(f[7]&0x7F, f[8]&0x7F);
-    if (d_len > 16) return;
 
+    ESP_LOGD("aquanext", "Trame recue: MSGT=%02X FKT=%03X Len=%d Raw: %s", msgt, fkt, d_len, b);
+
+    // Si c'est juste un echo de notre propre requête (MSGT 0x41), on ne traite pas
+    if (msgt == 0x41 && len <= 12) return; 
+
+    // Décodage des données si présentes
     uint8_t d[16] = {0};
-    for(int i=0; i<d_len; i++) d[i] = hex_to_byte_(f[9+i*2]&0x7F, f[10+i*2]&0x7F);
+    if (len > 12) {
+       for(int i=0; i<d_len && i<16; i++) {
+         d[i] = hex_to_byte_(f[9+i*2]&0x7F, f[10+i*2]&0x7F);
+       }
+    }
 
-    if (msgt != JANUS_MSGT_READ) return;
-    ESP_LOGD("aquanext", "Decodage FKT %03X, Len %d", fkt, d_len);
-
+    // Traitement des données
     switch(fkt) {
+      case FKT_T_EVAP:
+        if (temperature_evap_sensor_) temperature_evap_sensor_->publish_state(decode_temp_(d[0], d[1]));
+        break;
+      case FKT_T_AIR:
+        if (temperature_air_sensor_) temperature_air_sensor_->publish_state(decode_temp_(d[0], d[1]));
+        break;
       case FKT_STATUS:
         if (temperature_target_sensor_) temperature_target_sensor_->publish_state(decode_temp_(d[0], d[1]));
         if (temperature_dome_sensor_) temperature_dome_sensor_->publish_state(decode_temp_(d[4], d[5]));
-        if (power_binary_sensor_) power_binary_sensor_->publish_state(d[8] & 0x01);
         break;
-      case FKT_SETTINGS:
-        current_settings_ = d[0];
-        if (setting_antibact_binary_sensor_) setting_antibact_binary_sensor_->publish_state(d[0] & SETTING_ANTIBACT);
-        break;
-      case FKT_T_AIR: if (temperature_air_sensor_) temperature_air_sensor_->publish_state(decode_temp_(d[0], d[1])); break;
-      case FKT_HP_H:
-      case FKT_HE_H: {
-        uint32_t m = ((uint32_t)d[3]<<24)|((uint32_t)d[2]<<16)|((uint32_t)d[1]<<8)|d[0];
-        if (fkt==FKT_HP_H && hp_hours_sensor_) hp_hours_sensor_->publish_state(m/60.0f);
-        break;
-      }
     }
-  }
+  }}
 
   void build_read_(int fkt) {
     uint8_t f[24]; int i=0;
