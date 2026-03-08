@@ -12,10 +12,10 @@ namespace aquanext {
 // ============================================================
 // Janus2 Protocol Constants
 // ============================================================
-#define JANUS_STX       0x02
-#define JANUS_ETX       0x03
-#define JANUS_CR        0x0D
-#define JANUS_MSGT_READ 0xC1
+#define JANUS_STX        0x02
+#define JANUS_ETX        0x03
+#define JANUS_CR         0x0D
+#define JANUS_MSGT_READ  0xC1
 #define JANUS_MSGT_WRITE 0xC2
 #define JANUS_TEMP_NC_HI 0xFE
 #define JANUS_TEMP_NC_LO 0x7F
@@ -39,15 +39,15 @@ namespace aquanext {
 #define FKT_T_HP         0x012
 
 // Settings bitmask
-#define SETTING_ANTIBACT  0x01
-#define SETTING_GREEN     0x02
-#define SETTING_VOYAGE    0x04
-#define SETTING_DEFROST   0x08
-#define SETTING_HP_NC     0x10
+#define SETTING_ANTIBACT 0x01
+#define SETTING_GREEN    0x02
+#define SETTING_VOYAGE   0x04
+#define SETTING_DEFROST  0x08
+#define SETTING_HP_NC    0x10
 
 class AquaNextComponent : public Component, public uart::UARTDevice {
  public:
-  // ---- Sensors (temperatures) ----
+  // ---- Sensors ----
   SUB_SENSOR(temperature_target)
   SUB_SENSOR(temperature_dome)
   SUB_SENSOR(temperature_air)
@@ -91,13 +91,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   void set_mode(const std::string &mode) {
-    request_function_(FKT_SETTINGS);
-    delay(300);
+    // Note: pas de delay() ici - on utilise current_settings_ deja connu
     uint8_t s = current_settings_;
     s &= ~(SETTING_GREEN | SETTING_VOYAGE);
-    if (mode == "green")       s |= SETTING_GREEN;
-    else if (mode == "voyage") s |= SETTING_VOYAGE;
-    else if (mode == "boost")  { /* bits already cleared */ }
+    if (mode == "green")        s |= SETTING_GREEN;
+    else if (mode == "voyage")  s |= SETTING_VOYAGE;
+    else if (mode == "boost")   { /* bits already cleared */ }
     else {
       ESP_LOGW("aquanext", "Mode inconnu : %s", mode.c_str());
       return;
@@ -119,8 +118,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   void set_antibact(bool on) {
-    request_function_(FKT_SETTINGS);
-    delay(300);
     uint8_t s = current_settings_;
     if (on) s |= SETTING_ANTIBACT; else s &= ~SETTING_ANTIBACT;
     send_confirm_(FKT_SETTINGS, &s, 1);
@@ -128,31 +125,32 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   void request_all_temps() {
+    // Pas de delay() - on envoie une requete a la fois depuis le YAML interval
     const int fkts[] = {FKT_T_MAX, FKT_T_MIN, FKT_TW1, FKT_TW2,
                         FKT_T_AIR, FKT_T_EVAP, FKT_TW3, FKT_T_HP};
     for (int f : fkts) {
       request_function_(f);
-      delay(150);
     }
   }
 
   void request_status() {
     request_function_(FKT_SETTINGS);
-    delay(150);
     request_function_(FKT_SW_MB);
-    delay(150);
     request_function_(FKT_HP_H);
-    delay(150);
     request_function_(FKT_HE_H);
+  }
+
+  // Requete individuelle - a appeler depuis YAML interval pour espacer les requetes
+  void request_function(int fkt) {
+    request_function_(fkt);
   }
 
  protected:
   // ---- Internal state ----
   uint8_t rx_buf_[64];
-  int rx_idx_ = 0;
-  bool in_frame_ = false;
-  bool etx_seen_ = false;
-  int expected_len_ = 0;   // longueur de trame calculee depuis LEN
+  int     rx_idx_       = 0;
+  bool    in_frame_     = false;
+  int     expected_len_ = 0;
   uint8_t current_settings_ = 0x00;
 
   // ---- Utilities ----
@@ -174,85 +172,93 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   static bool check_lrc_(uint8_t *frame, int len) {
-    // LRC = somme de MSGT(frame[1]) jusqu'a ETX(frame[len-3]) inclus
-    // Comparaison sur 7 bits car bit 7 peut etre parasite sur le LRC recu
+    // LRC = somme de frame[1] (MSGT) jusqu'a frame[len-2] (ETX) inclus
+    // Tout est deja masque 0x7F donc comparaison directe
     uint8_t sum = 0;
-    for (int i = 1; i <= len - 3; i++) sum += frame[i];
-    uint8_t lrc = frame[len - 2] & 0x7F;
-    return (sum & 0x7F) == lrc;
+    for (int i = 1; i <= len - 2; i++) sum += frame[i];
+    return sum == frame[len - 1];
   }
 
   // ---- Serial reception ----
-  // Protocole Janus2 : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC CR
-  // longueur fixe = 12 + data_len*2 octets
-  // On calcule la longueur attendue des que LEN est connu (pos 7+8)
-  // et on cloture exactement a cette longueur
+  // Tout est stocke masque (& 0x7F) sauf detection STX sur raw==0x02 strict
+  // Longueur calculee depuis LEN (pos 7,8) -> cloture exacte sans dependre du CR
   void read_serial_() {
     while (available()) {
-
       uint8_t raw = read();
       uint8_t b   = raw & 0x7F;
 
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", raw);
 
-      if (b == JANUS_STX) {
-        rx_idx_ = 0;
-        in_frame_ = true;
+      // STX strict : uniquement 0x02 brut (0x82 = MSGT corrompu, pas un STX)
+      if (raw == JANUS_STX) {
+        rx_idx_       = 0;
+        in_frame_     = true;
         expected_len_ = 0;
         rx_buf_[rx_idx_++] = JANUS_STX;
-      } else if (in_frame_) {
-        if (rx_idx_ < 64) rx_buf_[rx_idx_++] = raw;
+        continue;
+      }
 
-        // Des que LEN est recu (pos 7 et 8), calcule longueur attendue
-        if (rx_idx_ == 9) {
-          uint8_t hi = rx_buf_[7] & 0x7F;
-          uint8_t lo = rx_buf_[8] & 0x7F;
-          uint8_t data_len = hex_to_byte_(hi, lo);
-          // STX(1) MSGT(1) FKT(3) PAD(2) LEN(2) DATA(data_len*2) ETX(1) LRC(1) CR(1)
-          expected_len_ = 12 + data_len * 2;
-          ESP_LOGD("aquanext", "Trame attendue: %d octets (data_len=%d)", expected_len_, data_len);
-        }
+      if (!in_frame_) continue;
 
-        // Cloture si longueur atteinte
-        if (expected_len_ > 0 && rx_idx_ >= expected_len_) {
-          // Normalise LRC (masque bit7) et ajoute CR synthetique
-          uint8_t lrc_raw = rx_buf_[expected_len_ - 2];
-          rx_buf_[expected_len_ - 2] = lrc_raw;  // garde LRC tel quel
-          rx_buf_[expected_len_ - 1] = JANUS_CR; // normalise CR
-          int frame_len = rx_idx_;  // longueur reelle stockee
-          in_frame_ = false;
-          rx_idx_ = 0;
-          decode_frame_(rx_buf_, frame_len);
-        }
+      // Securite anti-debordement
+      if (rx_idx_ >= 63) {
+        ESP_LOGW("aquanext", "Buffer overflow, reset");
+        in_frame_ = false;
+        rx_idx_   = 0;
+        continue;
+      }
+
+      // Stocke masque
+      rx_buf_[rx_idx_++] = b;
+
+      // Calcule longueur attendue des que LEN est disponible (pos 7 et 8)
+      if (rx_idx_ == 9) {
+        uint8_t data_len  = hex_to_byte_(rx_buf_[7], rx_buf_[8]);
+        // STX(1) MSGT(1) FKT(3) PAD(2) LEN(2) DATA(data_len*2) ETX(1) LRC(1) = 11 + data_len*2
+        // On n'attend plus le CR - on cloture apres LRC
+        expected_len_ = 11 + data_len * 2;
+        ESP_LOGD("aquanext", "Longueur trame attendue: %d (data=%d)", expected_len_, data_len);
+      }
+
+      // Cloture quand longueur atteinte
+      if (expected_len_ > 0 && rx_idx_ >= expected_len_) {
+        in_frame_     = false;
+        int frame_len = rx_idx_;
+        rx_idx_       = 0;
+        expected_len_ = 0;
+        decode_frame_(rx_buf_, frame_len);
       }
     }
   }
 
   // ---- Frame decoding ----
-
+  // frame[] : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC
+  // Tout est masque 0x7F sauf STX qui vaut 0x02
   void decode_frame_(uint8_t *frame, int len) {
-    if (len < 12) return;
+    if (len < 11) {
+      ESP_LOGW("aquanext", "Trame trop courte: %d", len);
+      return;
+    }
     if (frame[0] != JANUS_STX) return;
-    if (frame[len - 1] != JANUS_CR) return;
+
+    // Verifie LRC : somme de frame[1] a frame[len-2], compare a frame[len-1]
     if (!check_lrc_(frame, len)) {
-      ESP_LOGW("aquanext", "LRC invalide (len=%d)", len);
-      // Log la trame pour debug
       char logbuf[200];
       int pos = 0;
       for (int i = 0; i < len && pos < 190; i++)
         pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, "%02X ", frame[i]);
-      ESP_LOGW("aquanext", "Frame: %s", logbuf);
+      ESP_LOGW("aquanext", "LRC invalide: %s", logbuf);
       return;
     }
 
-    uint8_t msgt = frame[1] & 0x7F;  // masque MSGT aussi
-    char fkt_str[4] = {(char)(frame[2] & 0x7F), (char)(frame[3] & 0x7F), (char)(frame[4] & 0x7F), 0};
-    int fkt = strtol(fkt_str, nullptr, 16);
-    int data_len = hex_to_byte_(frame[7] & 0x7F, frame[8] & 0x7F);
+    uint8_t msgt    = frame[1];
+    char fkt_str[4] = {(char)frame[2], (char)frame[3], (char)frame[4], 0};
+    int  fkt        = strtol(fkt_str, nullptr, 16);
+    int  data_len   = hex_to_byte_(frame[7], frame[8]);
 
     uint8_t data[16] = {};
     for (int i = 0; i < data_len && i < 16; i++) {
-      data[i] = hex_to_byte_(frame[9 + i * 2] & 0x7F, frame[10 + i * 2] & 0x7F);
+      data[i] = hex_to_byte_(frame[9 + i * 2], frame[10 + i * 2]);
     }
 
     ESP_LOGD("aquanext", "Frame OK: MSGT=0x%02X FKT=%03X data_len=%d", msgt, fkt, data_len);
@@ -262,18 +268,18 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     switch (fkt) {
 
       case FKT_STATUS: {
-        if (data_len < 7) break;
-        float t_target = decode_temp_(data[0], data[1]);
-        float t_dome   = decode_temp_(data[4], data[5]);
+        if (data_len < 9) break;
+        float t_target  = decode_temp_(data[0], data[1]);
+        float t_dome    = decode_temp_(data[4], data[5]);
         uint8_t program = data[7];
         uint8_t symbols = data[8];
 
-        if (!std::isnan(t_target) && temperature_target_sensor_ != nullptr)
+        if (!std::isnan(t_target) && temperature_target_sensor_)
           temperature_target_sensor_->publish_state(t_target);
-        if (!std::isnan(t_dome) && temperature_dome_sensor_ != nullptr)
+        if (!std::isnan(t_dome) && temperature_dome_sensor_)
           temperature_dome_sensor_->publish_state(t_dome);
 
-        if (mode_text_sensor_ != nullptr) {
+        if (mode_text_sensor_) {
           std::string mode_str;
           switch (program) {
             case 0x00: mode_str = "boost";   break;
@@ -308,6 +314,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         if (setting_antibact_binary_sensor_) setting_antibact_binary_sensor_->publish_state(s & SETTING_ANTIBACT);
         if (setting_green_binary_sensor_)    setting_green_binary_sensor_->publish_state(s & SETTING_GREEN);
         if (setting_voyage_binary_sensor_)   setting_voyage_binary_sensor_->publish_state(s & SETTING_VOYAGE);
+        ESP_LOGD("aquanext", "Settings: 0x%02X", s);
         break;
       }
 
@@ -324,6 +331,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         char ver[8];
         snprintf(ver, sizeof(ver), "%02X%02X%02X", data[0], data[1], data[2]);
         if (fw_version_text_sensor_) fw_version_text_sensor_->publish_state(std::string(ver));
+        ESP_LOGD("aquanext", "FW: %s", ver);
         break;
       }
 
@@ -340,6 +348,10 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         if (he_hours_sensor_) he_hours_sensor_->publish_state(mins / 60.0f);
         break;
       }
+
+      default:
+        ESP_LOGD("aquanext", "FKT inconnu: %03X", fkt);
+        break;
     }
   }
 
@@ -376,24 +388,20 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     // LRC : somme de frame[1] (MSGT) jusqu'a ETX inclus
     uint8_t lrc = 0;
-    for (int i = 1; i < idx; i++) {
-      lrc += frame[i];
-    }
+    for (int i = 1; i < idx; i++) lrc += frame[i];
     frame[idx++] = lrc;
     frame[idx++] = JANUS_CR;
 
-    // debug TX
+    // Log TX
     char logbuf[200];
-    int pos = 0;
-    pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, "TX raw:");
+    int pos = snprintf(logbuf, sizeof(logbuf), "TX raw:");
     for (int i = 0; i < idx && pos < (int)sizeof(logbuf) - 4; i++)
       pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", frame[i]);
     ESP_LOGD("aquanext", "%s", logbuf);
+    ESP_LOGD("aquanext", "TX [%d bytes] FKT=%03X", idx, fkt);
 
     write_array(frame, idx);
     flush();
-
-    ESP_LOGD("aquanext", "TX [%d bytes] FKT=%03X LEN=%02X", idx, fkt, len_field);
   }
 
   void request_function_(int fkt) {
