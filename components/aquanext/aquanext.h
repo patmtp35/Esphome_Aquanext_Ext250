@@ -223,7 +223,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   // Longueur calculee depuis LEN (pos 7,8) -> cloture exacte sans dependre du CR
   void read_serial_() {
     // Timeout trame : si on est en attente et rien depuis 150ms -> decode ce qu'on a
-    if (in_frame_ && expected_len_ > 0 && rx_idx_ >= 11 && (millis() - rx_last_ms_) > 150) {
+    if (in_frame_ && expected_len_ > 0 && rx_idx_ >= 11 && (millis() - rx_last_ms_) > 500) {
       ESP_LOGD("aquanext", "Timeout trame (rx_idx=%d expected=%d), decode partiel", rx_idx_, expected_len_);
       in_frame_ = false;
       int frame_len = rx_idx_; rx_idx_ = 0; expected_len_ = 0;
@@ -373,8 +373,10 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
 
     ESP_LOGD("aquanext", "Frame OK: MSGT=0x%02X FKT=%03X data_len=%d", msgt, fkt, data_len);
 
-    // Accepter 0xC1 (READ response) et 0xC2 (WRITE confirm)
-    if (msgt != JANUS_MSGT_READ && msgt != JANUS_MSGT_WRITE) {
+    // Accepter 0xC1 ou 0x41 (READ, bit7 masqué au stockage) et 0xC2/0x42 (WRITE)
+    bool msgt_ok = (msgt == JANUS_MSGT_READ  || msgt == (uint8_t)(JANUS_MSGT_READ  & 0x7F) ||
+                    msgt == JANUS_MSGT_WRITE || msgt == (uint8_t)(JANUS_MSGT_WRITE & 0x7F));
+    if (!msgt_ok) {
       ESP_LOGD("aquanext", "MSGT inconnu 0x%02X, ignore", msgt);
       return;
     }
