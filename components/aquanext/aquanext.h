@@ -172,11 +172,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   static bool check_lrc_(uint8_t *frame, int len) {
-    // LRC = somme de frame[1] (MSGT) jusqu'a frame[len-2] (ETX) inclus
-    // Tout est deja masque 0x7F donc comparaison directe
+    // LRC = somme des octets BRUTS de frame[1] (MSGT) jusqu'a frame[len-2] (ETX)
+    // Le bit 7 peut etre a 1 sur n'importe quel octet (bit de parité MARK du Janus2)
+    // On compare modulo 128 (& 0x7F) pour absorber ce bit parasite sur le LRC lui-meme
     uint8_t sum = 0;
     for (int i = 1; i <= len - 2; i++) sum += frame[i];
-    return sum == frame[len - 1];
+    return (sum & 0x7F) == (frame[len - 1] & 0x7F);
   }
 
   // ---- Serial reception ----
@@ -185,8 +186,6 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void read_serial_() {
     while (available()) {
       uint8_t raw = read();
-      uint8_t b   = raw & 0x7F;
-
       ESP_LOGD("aquanext_rx", "RX byte: 0x%02X", raw);
 
       // STX strict : uniquement 0x02 brut (0x82 = MSGT corrompu, pas un STX)
@@ -208,12 +207,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         continue;
       }
 
-      // Stocke masque
-      rx_buf_[rx_idx_++] = b;
+      // Stocke l'octet BRUT - masque 0x7F applique uniquement a l'interpretation
+      rx_buf_[rx_idx_++] = raw;
 
       // Calcule longueur attendue des que LEN est disponible (pos 7 et 8)
       if (rx_idx_ == 9) {
-        uint8_t data_len  = hex_to_byte_(rx_buf_[7], rx_buf_[8]);
+        uint8_t data_len  = hex_to_byte_(rx_buf_[7] & 0x7F, rx_buf_[8] & 0x7F);
         // STX(1) MSGT(1) FKT(3) PAD(2) LEN(2) DATA(data_len*2) ETX(1) LRC(1) = 11 + data_len*2
         // On n'attend plus le CR - on cloture apres LRC
         expected_len_ = 11 + data_len * 2;
@@ -232,8 +231,8 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   }
 
   // ---- Frame decoding ----
-  // frame[] : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC
-  // Tout est masque 0x7F sauf STX qui vaut 0x02
+  // frame[] : STX MSGT FKT(3) PAD(2) LEN(2) DATA ETX LRC  — octets BRUTS
+  // Le masque & 0x7F est applique octet par octet au moment de l'interpretation
   void decode_frame_(uint8_t *frame, int len) {
     if (len < 11) {
       ESP_LOGW("aquanext", "Trame trop courte: %d", len);
@@ -251,14 +250,19 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
       return;
     }
 
-    uint8_t msgt    = frame[1];
-    char fkt_str[4] = {(char)frame[2], (char)frame[3], (char)frame[4], 0};
-    int  fkt        = strtol(fkt_str, nullptr, 16);
-    int  data_len   = hex_to_byte_(frame[7], frame[8]);
+    uint8_t msgt    = frame[1] & 0x7F;
+    char fkt_str[4] = {
+      (char)(frame[2] & 0x7F),
+      (char)(frame[3] & 0x7F),
+      (char)(frame[4] & 0x7F),
+      0
+    };
+    int  fkt      = strtol(fkt_str, nullptr, 16);
+    int  data_len = hex_to_byte_(frame[7] & 0x7F, frame[8] & 0x7F);
 
     uint8_t data[16] = {};
     for (int i = 0; i < data_len && i < 16; i++) {
-      data[i] = hex_to_byte_(frame[9 + i * 2], frame[10 + i * 2]);
+      data[i] = hex_to_byte_(frame[9 + i * 2] & 0x7F, frame[10 + i * 2] & 0x7F);
     }
 
     ESP_LOGD("aquanext", "Frame OK: MSGT=0x%02X FKT=%03X data_len=%d", msgt, fkt, data_len);
