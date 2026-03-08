@@ -135,14 +135,33 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   void read_serial_() {
     while (available()) {
       uint8_t r = read();
+      
+      // On ignore les octets de synchro FF
       if (r == 0xFF) continue;
-      if (r == JANUS_STX) { rx_idx_ = 0; in_frame_ = true; rx_buf_[rx_idx_++] = r; continue; }
+
+      // RECTIFICATION : Le bus Janus2 utilise souvent le 8ème bit pour la parité.
+      // On force la remise à zéro du bit de poids fort (Parité Space/Mark)
+      r &= 0x7F; 
+
+      if (r == JANUS_STX) { 
+        rx_idx_ = 0; 
+        in_frame_ = true; 
+        rx_buf_[rx_idx_++] = r; 
+        continue; 
+      }
+      
       if (!in_frame_) continue;
+      
       rx_buf_[rx_idx_++] = r;
-      if (rx_idx_ >= 11 && (rx_buf_[rx_idx_-2] & 0x7F) == JANUS_ETX) {
+
+      // On cherche la fin de trame (ETX + LRC + CR)
+      // Dans ta trame logguée, le 03 (ETX) est arrivé très tard.
+      if (r == JANUS_CR && rx_idx_ > 5) {
         decode_frame_(rx_buf_, rx_idx_);
         in_frame_ = false;
       }
+
+      if (rx_idx_ >= 63) in_frame_ = false; // Sécurité overflow
     }
   }
 
