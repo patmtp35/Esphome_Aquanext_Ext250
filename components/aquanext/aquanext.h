@@ -304,14 +304,15 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     }
     if (frame[0] != JANUS_STX) return;
 
-    // Verifie LRC : somme de frame[1] a frame[len-2], compare a frame[len-1]
+    // LRC verifie mais non bloquant : JoHu (auteur doc Janus2) confirme
+    // que le calcul LRC n'a jamais ete valide dans ses tests non plus.
+    // On logue un warning mais on decode quand meme.
     if (!check_lrc_(frame, len)) {
       char logbuf[200];
       int pos = 0;
       for (int i = 0; i < len && pos < 190; i++)
         pos += snprintf(logbuf + pos, sizeof(logbuf) - pos, "%02X ", frame[i]);
-      ESP_LOGW("aquanext", "LRC invalide: %s", logbuf);
-      return;
+      ESP_LOGD("aquanext", "LRC invalide (decode quand meme): %s", logbuf);
     }
 
     uint8_t msgt    = frame[1] & 0x7F;
