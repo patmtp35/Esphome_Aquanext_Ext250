@@ -158,6 +158,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   // Sur bus Janus2 half-duplex, on recoit notre propre TX en echo
   // On ignore les N premiers octets apres chaque TX
   int     echo_skip_    = 0;  // nb d'octets TX restant a ignorer
+  uint32_t rx_last_ms_  = 0;  // timestamp dernier octet recu (pour timeout trame)
 
   // ---- TX queue (evite les envois simultanees qui corrompent les reponses) ----
   static const int TX_QUEUE_SIZE = 16;
@@ -221,8 +222,16 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
   // Tout est stocke masque (& 0x7F) sauf detection STX sur raw==0x02 strict
   // Longueur calculee depuis LEN (pos 7,8) -> cloture exacte sans dependre du CR
   void read_serial_() {
+    // Timeout trame : si on est en attente et rien depuis 150ms -> decode ce qu'on a
+    if (in_frame_ && expected_len_ > 0 && rx_idx_ >= 11 && (millis() - rx_last_ms_) > 150) {
+      ESP_LOGD("aquanext", "Timeout trame (rx_idx=%d expected=%d), decode partiel", rx_idx_, expected_len_);
+      in_frame_ = false;
+      int frame_len = rx_idx_; rx_idx_ = 0; expected_len_ = 0;
+      decode_frame_(rx_buf_, frame_len);
+    }
     while (available()) {
       uint8_t raw = read();
+      rx_last_ms_ = millis();
       // Ignore les echos de notre propre TX (bus half-duplex)
       if (echo_skip_ > 0) {
         echo_skip_--;
@@ -253,8 +262,12 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
         continue;
       }
 
-      // Stocke l'octet BRUT - masque 0x7F applique uniquement a l'interpretation
-      rx_buf_[rx_idx_++] = raw;
+      // Masque bit7 systematiquement : le Renesas envoie certains octets avec bit7=1
+      // (parité Mark ou mode multidrop RS-485). Tous les octets du protocole Janus2
+      // sont des ASCII hex (0x30-0x46) ou des valeurs < 0x80, sauf le LRC qui peut
+      // depasser 0x7F. On stocke masque pour faciliter le decodage ASCII.
+      // Exception : le LRC est stocke brut (on le masque dans check_lrc_).
+      rx_buf_[rx_idx_++] = raw & 0x7F;
 
       // Calcule longueur attendue des que LEN est disponible (pos 7 et 8)
       if (rx_idx_ == 9) {
