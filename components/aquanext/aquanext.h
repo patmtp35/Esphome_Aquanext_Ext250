@@ -113,6 +113,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     }
     uint8_t int_part  = (uint8_t)temp;
     uint8_t frac_part = (uint8_t)((temp - int_part) * 255.0f);
+    // Doc: WRITE Confirm Temp -> data[0]=deg, data[1]=frac (ex: 0042 = 0x00,0x42 = 0°frac, 66°C)
     uint8_t data[2]   = {int_part, frac_part};
     send_confirm_(FKT_TARGET_TEMP, data, 2);
     ESP_LOGI("aquanext", "set_target_temp -> %.2f C", temp);
@@ -284,7 +285,7 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
           int fkt_id = strtol(fs, nullptr, 16);
           int expected_dl = -1;
           switch (fkt_id) {
-            case 0x003: expected_dl = 9; break;  // STATUS
+            case 0x003: expected_dl = 12; break;  // STATUS (12 octets selon doc)
             case 0x004: expected_dl = 4; break;  // ERRORS
             case 0x005: case 0x006: case 0x00A: case 0x00B:
             case 0x00C: case 0x00D: case 0x00E: case 0x012:
@@ -384,11 +385,19 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
     switch (fkt) {
 
       case FKT_STATUS: {
-        if (data_len < 9) break;
+        // Doc Janus2: STATUS = 12 octets
+        // [0,1]=TargetTemp [2,3]=Unknown [4,5]=DomeTemp/TW3
+        // [6]=Status1 [7]=Program [8]=DisplayedSymbols
+        // [9]=Status2 [10]=Status3/ErrorPresent?? [11]=Status4
+        if (data_len < 8) break;
         float t_target  = decode_temp_(data[0], data[1]);
         float t_dome    = decode_temp_(data[4], data[5]);
         uint8_t program = data[7];
         uint8_t symbols = data[8];
+
+        ESP_LOGD("aquanext", "STATUS raw: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+          data[0], data[1], data[2], data[3], data[4], data[5],
+          data[6], data[7], data[8], data[9], data[10], data[11]);
 
         if (!std::isnan(t_target) && temperature_target_sensor_)
           temperature_target_sensor_->publish_state(t_target);
@@ -407,12 +416,19 @@ class AquaNextComponent : public Component, public uart::UARTDevice {
           mode_text_sensor_->publish_state(mode_str);
         }
 
+        // DisplayedSymbols: 0x01=ON, 0x02=HeatPump actif, 0x04=HeatElement actif
         if (power_binary_sensor_)
           power_binary_sensor_->publish_state(symbols & 0x01);
         if (heat_pump_active_binary_sensor_)
           heat_pump_active_binary_sensor_->publish_state(symbols & 0x02);
         if (heat_element_active_binary_sensor_)
           heat_element_active_binary_sensor_->publish_state(symbols & 0x04);
+
+        // Status2/3/4 : inconnus pour l'instant, on logue pour analyse
+        if (data_len >= 12) {
+          ESP_LOGD("aquanext", "STATUS extra: S1=%02X S2=%02X S3=%02X S4=%02X",
+            data[6], data[9], data[10], data[11]);
+        }
         break;
       }
 
